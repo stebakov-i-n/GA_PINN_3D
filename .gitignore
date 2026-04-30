@@ -7,3 +7,4 @@ mlp_pinn.pth
 mlp_pinn_resume.pth
 optimizer.pth
 optimizer_resume.pth
+README.md

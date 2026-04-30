@@ -1,12 +1,5 @@
 clearml
 boto3
-xformers==0.0.32.post2
-huggingface-hub==0.36.0
-peft==0.17.1
-unsloth==2025.11.2
-transformers==4.57.1
-numpy==2.2.6
-scikit-learn==1.7.2
-scipy
-matplotlib
-opencv-python
+numpy
+numpy-stl
+json
