@@ -42,7 +42,7 @@ Q = 1.5e-6
 _BND_START = INTERIOR_SIZE                                             # начало boundary (walls)
 _BND_END   = INTERIOR_SIZE + WALLS_SIZE + INLET_SIZE + OUTLET_SIZE    # конец non-outerior
 
-B = 2
+B = 4
 
 TRAIN_PINN = True
 RESUME_PINN = False
@@ -224,7 +224,7 @@ if TRAIN_PINN:
 else:
     history = {'res_1': [], 'res_2': [], 'res_3': [], 'res_4': [], 'mse_out': [], 'mse_phi': []}
 
-for i in tqdm(range(10000)):
+for i in tqdm(range(20000)):
     ga_pinn.train()
     for x, phi, out, norm_in, norm_out, center_out, l, s, v_mean, x_label in tqdm(loader):
         optimizer.zero_grad()
@@ -275,3 +275,14 @@ for i in tqdm(range(10000)):
             json.dump(history, fp)
 
     lr_scheduler.step()
+
+
+if not LOCAL:
+    if TRAIN_PINN:
+        task.upload_artifact(f'model', artifact_object='mlp_pinn.pth')
+        task.upload_artifact(f'history', artifact_object='history_pinn.pth')
+        task.upload_artifact(f'optimizer', artifact_object='optimizer_pinn.pth')
+    else:
+        task.upload_artifact(f'model', artifact_object='mlp_dist.pth')
+        task.upload_artifact(f'history', artifact_object='history_dist.pth')
+        task.upload_artifact(f'optimizer', artifact_object='optimizer_dist.pth')
