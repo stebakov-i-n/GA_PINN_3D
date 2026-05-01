@@ -53,8 +53,10 @@ class Dataset(torch.utils.data.Dataset):
         self.data = []
         for dir in os.listdir(path):
             for file in os.listdir(os.path.join(path, dir)):
-                if file.count('_') == 1 and file.split('_')[-1] != '-1.stl':
-                    self.data.append(load_stl(os.path.join(path, dir, file), device='cuda', gen_int_p=GEN_INTERIOR_POINTS))
+                if (file.count('_') == 1) and (file.split('_')[-1] != '-1.stl') and ('.stl' in file):
+                    if file.replace('.stl', '.pt') in os.listdir(os.path.join(path, dir)):
+                        self.data.append(load_stl(os.path.join(path, dir, file), device='cuda', gen_int_p=GEN_INTERIOR_POINTS))
+                        break
 
     def __getitem__(self, index):
         agg = self.data[index]

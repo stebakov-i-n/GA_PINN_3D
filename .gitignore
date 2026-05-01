@@ -1,10 +1,10 @@
 aneurysm_test
 SimVascDataset
 trained_models
-history.json
-history_resume.json
+history_pinn.json
+history_dist.json
 mlp_pinn.pth
-mlp_pinn_resume.pth
-optimizer.pth
-optimizer_resume.pth
+mlp_dist.pth
+optimizer_pinn.pth
+optimizer_dist.pth
 Clearml_README.md
