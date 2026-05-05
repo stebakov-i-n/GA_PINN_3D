@@ -4,5 +4,5 @@
 # pip cache purge 2>/dev/null || true
 # apt-get clean
 # echo "=== Available space after cleanup==="
-# df -h
+df -h
 # apt-get install -y libgl1

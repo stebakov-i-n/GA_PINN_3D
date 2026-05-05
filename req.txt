@@ -2,4 +2,4 @@ clearml
 boto3
 numpy
 numpy-stl
-json
+tqdm
