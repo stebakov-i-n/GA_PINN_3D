@@ -4,8 +4,6 @@ import torch.nn as nn
 from tqdm import tqdm
 import json
 from modules import *
-from clearml import Task, Dataset
-
 
 # Efficient/flash attention не поддерживают backward через backward (нужен для d2v в PINN).
 # Math backend поддерживает произвольный порядок градиентов.
@@ -13,23 +11,9 @@ torch.backends.cuda.enable_flash_sdp(False)
 torch.backends.cuda.enable_mem_efficient_sdp(False)
 torch.backends.cuda.enable_math_sdp(True)
 
-LOCAL = True
 
-if not LOCAL:
-    task = Task.init(auto_connect_frameworks=False)
-
-    dataset = Dataset.get(dataset_name='SimVascDataset', dataset_project='kornaeva-rnf/GA_PINN_3D')
-    DATASET_PATH = dataset.get_local_copy()
-
-    dataset = Dataset.get(dataset_name='trained_models', dataset_project='kornaeva-rnf/GA_PINN_3D')
-    MODELS_PATH = dataset.get_local_copy()
-
-    del dataset
-
-else:
-    task = Task.init(project_name='kornaeva-rnf/GA_PINN_3D', task_name='Train_only_div_v', auto_connect_frameworks=False)
-    MODELS_PATH = './'
-    DATASET_PATH = 'SimVascDataset'
+MODELS_PATH = 'trained_models'
+DATASET_PATH = 'SimVascDataset'
 
 INTERIOR_SIZE = 500
 WALLS_SIZE    = 250
@@ -46,7 +30,7 @@ _BND_END   = INTERIOR_SIZE + WALLS_SIZE + INLET_SIZE + OUTLET_SIZE    # коне
 B = 2
 
 TRAIN_PINN = True
-RESUME_PINN = True
+RESUME_PINN = False
 GEN_INTERIOR_POINTS = False
 
 class Dataset(torch.utils.data.Dataset):
@@ -116,7 +100,7 @@ class Dataset(torch.utils.data.Dataset):
 
 class GAPinn(nn.Module):
     def __init__(self, d_model=512, nhead=8, num_enc_layers=6, num_dec_layers=4,
-                 dim_ff=2048, dropout=0.0):
+                 dim_ff=2048, dropout=0.1):
         super().__init__()
 
         self.projector = nn.Linear(3, d_model)
@@ -193,17 +177,7 @@ ga_pinn = GAPinn().cuda()
 
 if TRAIN_PINN:
     if RESUME_PINN:
-        if not LOCAL:
-            resume_task = Task.get_task(task_id='14b9427c14da4b1f8daf8ee1cd988daf',
-                project_name='kornaeva-rnf/GA_PINN_3D'
-            )
-
-            history_path = resume_task.artifacts['history'].get_local_copy()
-            model_path = resume_task.artifacts['model'].get_local_copy()    
-            optimizer_path = resume_task.artifacts['optimizer'].get_local_copy()
-            ga_pinn.load_state_dict(torch.load(model_path))
-        else:
-            ga_pinn.load_state_dict(torch.load(f'{MODELS_PATH}/mlp_pinn.pth'))
+        ga_pinn.load_state_dict(torch.load(f'{MODELS_PATH}/mlp_pinn.pth'))
     else:
         ga_pinn.load_state_dict(torch.load(f'{MODELS_PATH}/mlp_dist.pth'))
 
@@ -213,11 +187,8 @@ loader = torch.utils.data.DataLoader(dataset, batch_size=B, shuffle=True)
 
 if TRAIN_PINN:
     if RESUME_PINN:
-        optimizer = torch.optim.Adam(ga_pinn.transformer_decoder_flow.parameters(), lr=5e-5)
-        if not LOCAL:
-            optimizer.load_state_dict(torch.load(optimizer_path))
-        else:
-            optimizer.load_state_dict(torch.load(f'{MODELS_PATH}/optimizer_pinn.pth'))
+        optimizer = torch.optim.Adam(ga_pinn.transformer_decoder_flow.parameters(), lr=5e-4)
+        optimizer.load_state_dict(torch.load(f'{MODELS_PATH}/optimizer_pinn.pth'))
     else:
         optimizer = torch.optim.Adam(ga_pinn.transformer_decoder_flow.parameters(), lr=5e-4)
      
@@ -225,7 +196,7 @@ else:
     optimizer = torch.optim.Adam(ga_pinn.parameters(), lr=5e-4)
 
 if TRAIN_PINN:
-    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 160, 0.97,
+    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 130, 0.97,
                                                         last_epoch=- 1)
 else:
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 50, 0.97,
@@ -235,25 +206,15 @@ loss_fcn = torch.nn.MSELoss()
 
 if TRAIN_PINN:
     if RESUME_PINN:
-        if not LOCAL:
-            with open(history_path, 'r') as fp:
-               history = json.load(fp)
-        else:
-            with open(f'{MODELS_PATH}/history_pinn.json', 'r') as fp:
-               history = json.load(fp)
+        with open(f'{MODELS_PATH}/history_pinn.json', 'r') as fp:
+            history = json.load(fp)
     else:
         history = {'res_1': [], 'res_2': [], 'res_3': [], 'res_4': [], 'mse_out': [], 'mse_phi': []}
 else:
     history = {'res_1': [], 'res_2': [], 'res_3': [], 'res_4': [], 'mse_out': [], 'mse_phi': []}
 
-logger = task.get_logger()
 
-# for i in range(10000):
-#     for key in ('res_1', 'res_2', 'res_3', 'res_4'):
-#         logger.report_scalar(title='Residuals', series=key, value=history[key][10000 + i], iteration=i)
-
-
-for i in tqdm(range(10000)):
+for i in tqdm(range(5000)):
     ga_pinn.train()
 
     epoch_sums = {'res_1': 0., 'res_2': 0., 'res_3': 0., 'res_4': 0.,
@@ -289,9 +250,9 @@ for i in tqdm(range(10000)):
 
         if TRAIN_PINN:
             epoch_sums['res_1'] += mse_zero_loss(res[0].detach().cpu()).item()
-            # epoch_sums['res_2'] += mse_zero_loss(res[1].detach().cpu()).item()
-            # epoch_sums['res_3'] += mse_zero_loss(res[2].detach().cpu()).item()
-            # epoch_sums['res_4'] += mse_zero_loss(res[3].detach().cpu()).item()
+            epoch_sums['res_2'] += mse_zero_loss(res[1].detach().cpu()).item()
+            epoch_sums['res_3'] += mse_zero_loss(res[2].detach().cpu()).item()
+            epoch_sums['res_4'] += mse_zero_loss(res[3].detach().cpu()).item()
         else:
             epoch_sums['mse_out'] += loss_out.detach().cpu().item()
             epoch_sums['mse_phi'] += loss_phi.detach().cpu().item()
@@ -302,12 +263,10 @@ for i in tqdm(range(10000)):
         for key in ('res_1', 'res_2', 'res_3', 'res_4'):
             mean_val = epoch_sums[key] / n_batches
             history[key].append(mean_val)
-            logger.report_scalar(title='Residuals', series=key, value=mean_val, iteration=i)
     else:
         for key in ('mse_out', 'mse_phi'):
             mean_val = epoch_sums[key] / n_batches
             history[key].append(mean_val)
-            logger.report_scalar(title='Losses', series=key, value=mean_val, iteration=i)
 
     if TRAIN_PINN:
         torch.save(ga_pinn.state_dict(), f'mlp_pinn.pth')
@@ -322,13 +281,3 @@ for i in tqdm(range(10000)):
             json.dump(history, fp)
 
     lr_scheduler.step()
-
-
-if TRAIN_PINN:
-    task.upload_artifact(f'model', artifact_object='mlp_pinn.pth')
-    task.upload_artifact(f'history', artifact_object='history_pinn.json')
-    task.upload_artifact(f'optimizer', artifact_object='optimizer_pinn.pth')
-else:
-    task.upload_artifact(f'model', artifact_object='mlp_dist.pth')
-    task.upload_artifact(f'history', artifact_object='history_dist.json')
-    task.upload_artifact(f'optimizer', artifact_object='optimizer_dist.pth')

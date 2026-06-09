@@ -8,28 +8,28 @@ def calc_grad(v1, v2, v3, p, x):
     dv2 = autograd.grad(v2.sum(), x, create_graph=True)[0]
     dv3 = autograd.grad(v3.sum(), x, create_graph=True)[0]
     dp = autograd.grad(p.sum(), x, create_graph=True)[0]
-    d2v1 = autograd.grad(dv1.sum(), x, create_graph=True)[0]
-    d2v2 = autograd.grad(dv2.sum(), x, create_graph=True)[0]
-    d2v3 = autograd.grad(dv3.sum(), x, create_graph=True)[0]
-    return dv1, dv2, dv3, d2v1, d2v2, d2v3, dp
+    # d2v1 = autograd.grad(dv1.sum(), x, create_graph=True)[0]
+    # d2v2 = autograd.grad(dv2.sum(), x, create_graph=True)[0]
+    # d2v3 = autograd.grad(dv3.sum(), x, create_graph=True)[0]
+    return dv1, dv2, dv3, dv1, dv2, dv3, dp
 
 def calc_res(v1, v2, v3, p, dv1, dv2, dv3, d2v1, d2v2, d2v3, dp):
     mu = 3e-3
     rho = 1050
-    res1 = (v1 * dv1[..., 0:1] + v2 * dv1[..., 1:2] + v3 * dv1[..., 2:3]) - mu * (d2v1[..., 0:1] + d2v1[..., 1:2] + d2v1[..., 2:3]) / rho + dp[..., 0:1] / rho
-    res2 = (v1 * dv2[..., 0:1] + v2 * dv2[..., 1:2] + v3 * dv2[..., 2:3]) - mu * (d2v2[..., 0:1] + d2v2[..., 1:2] + d2v2[..., 2:3]) / rho + dp[..., 1:2] / rho
-    res3 = (v1 * dv3[..., 0:1] + v2 * dv3[..., 1:2] + v3 * dv3[..., 2:3]) - mu * (d2v3[..., 0:1] + d2v3[..., 1:2] + d2v3[..., 2:3]) / rho + dp[..., 2:3] / rho
+    # res1 = (v1 * dv1[..., 0:1] + v2 * dv1[..., 1:2] + v3 * dv1[..., 2:3]) - mu * (d2v1[..., 0:1] + d2v1[..., 1:2] + d2v1[..., 2:3]) / rho + dp[..., 0:1] / rho
+    # res2 = (v1 * dv2[..., 0:1] + v2 * dv2[..., 1:2] + v3 * dv2[..., 2:3]) - mu * (d2v2[..., 0:1] + d2v2[..., 1:2] + d2v2[..., 2:3]) / rho + dp[..., 1:2] / rho
+    # res3 = (v1 * dv3[..., 0:1] + v2 * dv3[..., 1:2] + v3 * dv3[..., 2:3]) - mu * (d2v3[..., 0:1] + d2v3[..., 1:2] + d2v3[..., 2:3]) / rho + dp[..., 2:3] / rho
     res4 = dv1[..., 0:1] + dv2[..., 1:2] + dv3[..., 2:3]
-    return [res1, res2, res3, res4]
+    return [res4]
 
 def mse_zero_loss(f):
     return (f ** 2).mean()
 
-def zero_loss(outputs, n=4):
+def zero_loss(outputs):
     loss = 0
-    for i in range(n):
+    for i in range(len(outputs)):
         loss += mse_zero_loss(outputs[i])
-    loss = loss / n
+    loss = loss / len(outputs)
     return loss
 
 def dist(a, b):
@@ -245,14 +245,14 @@ def load_stl(path, n=64, n_interior=5000000, n_walls=10000, n_inlet=10000, n_out
         torch.save(x_dict['interior'], path.replace('.stl', '.pt'))
     else:
         x_dict['interior'] = torch.load(path.replace('.stl', '.pt'))
-
+    
     print('done\n\nInlet points generation')
-    x_dict['inlet'], n_dict['inlet'], s = sample_boundary_points_from_stl(path.replace('.stl', '_1.stl'), centering, max_coord, int(n_inlet * 1.1), return_norm=True)
+    x_dict['inlet'], n_dict['inlet'], s = sample_boundary_points_from_stl(path.replace('.stl', '_1.stl' if odd else '_2.stl'), centering, max_coord, int(n_inlet * 1.1), return_norm=True)
     print('done\n\nOutlet points generation')
-    x_dict['outlet'], n_dict['outlet'], _ = sample_boundary_points_from_stl(path.replace('.stl', '_2.stl'), centering, max_coord, int(n_outlet * 1.1), return_norm=True)
+    x_dict['outlet'], n_dict['outlet'], _ = sample_boundary_points_from_stl(path.replace('.stl', '_2.stl' if odd else '_1.stl'), centering, max_coord, int(n_outlet * 1.1), return_norm=True)
+    n_dict['inlet_center'] = x_dict['inlet'].mean(0)
     n_dict['outlet_center'] = x_dict['outlet'].mean(0)
-    if odd:
-        x_dict['inlet'], x_dict['outlet'] = x_dict['outlet'], x_dict['inlet']
+    
     print('done\n\nWalls points generation')
     x_dict['walls'] = sample_boundary_points_from_stl(path.replace('.stl', '_3.stl'), centering, max_coord, int(n_walls * 1.1))
     print('done\n\n')
