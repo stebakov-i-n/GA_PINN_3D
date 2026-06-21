@@ -14,7 +14,7 @@ torch.backends.cuda.enable_flash_sdp(False)
 torch.backends.cuda.enable_mem_efficient_sdp(False)
 torch.backends.cuda.enable_math_sdp(True)
 
-LOCAL = False
+LOCAL = True
 
 if not LOCAL:
     task = Task.init(auto_connect_frameworks=False)
@@ -29,11 +29,8 @@ if not LOCAL:
 
 else:
     task = Task.init(project_name='kornaeva-rnf/GA_PINN_3D', task_name='Train_phi_div_v_test_4', auto_connect_frameworks=False)
-    MODELS_PATH = './'
-    DATASET_PATH = 'SimVascDataset'
-
-USE_EMB = True
-ACT = 'wave'
+MODELS_PATH = './'
+DATASET_PATH = 'SimVascDataset'
 
 INTERIOR_SIZE = 500
 WALLS_SIZE    = 250
@@ -47,9 +44,10 @@ Q = 1.5e-6
 _BND_START = INTERIOR_SIZE                                             # начало boundary (walls)
 _BND_END   = INTERIOR_SIZE + WALLS_SIZE + INLET_SIZE + OUTLET_SIZE    # конец non-outerior
 
-B = 8
+B = 4
 
-RESUME_PINN = True
+TRAIN_PINN = False
+RESUME_PINN = False
 GEN_INTERIOR_POINTS = False
 
 class Dataset(torch.utils.data.Dataset):
@@ -124,14 +122,6 @@ class Dataset(torch.utils.data.Dataset):
 def get_clones(module, N):
     return nn.ModuleList([copy.deepcopy(module) for i in range(N)])
 
-def get_act():
-    if ACT == 'wave':
-        return WaveAct()
-    elif ACT == 'tanh':
-        return torch.nn.Tanh()
-    elif ACT == 'silu':
-        return nn.SiLU(inplace=True)
-
 class WaveAct(nn.Module):
     def __init__(self):
         super(WaveAct, self).__init__() 
@@ -146,15 +136,15 @@ class FeedForward(nn.Module):
         super(FeedForward, self).__init__() 
         self.linear = nn.Sequential(*[
             nn.Linear(d_model, d_ff),
-            get_act(),
+            WaveAct(),
             nn.Linear(d_ff, d_ff),
-            get_act(),
+            WaveAct(),
             nn.Linear(d_ff, d_model)
         ])
 
     def forward(self, x):
         return self.linear(x)
-    
+
 
 class EncoderLayer(nn.Module):
     def __init__(self, d_model, heads):
@@ -162,8 +152,8 @@ class EncoderLayer(nn.Module):
 
         self.attn = nn.MultiheadAttention(embed_dim=d_model, num_heads=heads, batch_first=True)
         self.ff = FeedForward(d_model)
-        self.act1 = get_act()
-        self.act2 = get_act()
+        self.act1 = WaveAct()
+        self.act2 = WaveAct()
         
     def forward(self, x):
         x2 = self.act1(x)
@@ -179,8 +169,8 @@ class DecoderLayer(nn.Module):
 
         self.attn = nn.MultiheadAttention(embed_dim=d_model, num_heads=heads, batch_first=True)
         self.ff = FeedForward(d_model)
-        self.act1 = get_act()
-        self.act2 = get_act()
+        self.act1 = WaveAct()
+        self.act2 = WaveAct()
 
     def forward(self, x, e_outputs): 
         x2 = self.act1(x)
@@ -195,7 +185,7 @@ class Encoder(nn.Module):
         super(Encoder, self).__init__()
         self.N = N
         self.layers = get_clones(EncoderLayer(d_model, heads), N)
-        self.act = get_act()
+        self.act = WaveAct()
 
     def forward(self, x):
         for i in range(self.N):
@@ -208,7 +198,7 @@ class Decoder(nn.Module):
         super(Decoder, self).__init__()
         self.N = N
         self.layers = get_clones(DecoderLayer(d_model, heads), N)
-        self.act = get_act()
+        self.act = WaveAct()
         
     def forward(self, x, e_outputs):
         for i in range(self.N):
@@ -217,55 +207,36 @@ class Decoder(nn.Module):
 
 
 class GAPinn(nn.Module):
-    def __init__(self, d_hidden=512, d_model=256, N=4, heads=8):
+    def __init__(self, d_hidden=1024, d_model=64, N=4, heads=8):
         super(GAPinn, self).__init__()
-
-        if USE_EMB:
-            self.embedding = nn.Embedding(5, d_model)
 
         self.linear_emb = nn.Linear(9, d_model)
 
         self.encoder = Encoder(d_model, N, heads)
         self.decoder_phi = Decoder(d_model, N, heads)
-        # self.decoder_flow = Decoder(d_model, N, heads)
+        self.decoder_flow= Decoder(d_model, N, heads)
 
         self.linear_out_phi = nn.Sequential(*[
             nn.Linear(d_model, d_hidden),
-            get_act(),
+            WaveAct(),
             nn.Linear(d_hidden, d_hidden),
-            get_act(),
+            WaveAct(),
             nn.Linear(d_hidden, 2)
         ])
 
         self.linear_out_v = nn.Sequential(*[
             nn.Linear(d_model, d_hidden),
-            get_act(),
+            WaveAct(),
             nn.Linear(d_hidden, d_hidden),
-            get_act(),
-            nn.Linear(d_hidden, d_hidden),
-            get_act(),
-            nn.Linear(d_hidden, d_hidden),
-            get_act(),
-            nn.Linear(d_hidden, d_hidden),
-            get_act(),
-            nn.Linear(d_hidden, d_hidden),
-            get_act(),
-            nn.Linear(d_hidden, d_hidden),
-            get_act(),
-            nn.Linear(d_hidden, d_hidden),
-            get_act(),
-            nn.Linear(d_hidden, d_hidden),
-            get_act(),
-            nn.Linear(d_hidden, d_hidden),
-            get_act(),
+            WaveAct(),
             nn.Linear(d_hidden, 3)
         ])
 
         self.linear_out_p = nn.Sequential(*[
             nn.Linear(d_model, d_hidden),
-            get_act(),
+            WaveAct(),
             nn.Linear(d_hidden, d_hidden),
-            get_act(),
+            WaveAct(),
             nn.Linear(d_hidden, 1)
         ])
 
@@ -275,28 +246,18 @@ class GAPinn(nn.Module):
 
         if pinn:
             x_grad = x * 2 * l
-            # x_grad = x
             x_grad.requires_grad_(True)
             x_proj_enc = self.linear_emb(torch.cat((x_grad.clone().detach() / l / 2, out.unsqueeze(1).repeat(1, x.shape[1], 1)), -1))                 # (B, N, d_model)
-            if USE_EMB:
-                label_emb = self.embedding(x_label)        # (B, N, d_model)
-                x_proj_enc = x_proj_enc + label_emb
-            
             x_proj_dec = self.linear_emb(torch.cat((x_grad / l / 2, out.unsqueeze(1).repeat(1, x.shape[1], 1)), -1))                 # (B, N, d_model)
-            # x_proj_enc = self.linear_emb(torch.cat((x_grad.clone().detach(), out.unsqueeze(1).repeat(1, x.shape[1], 1)), -1))                 # (B, N, d_model)
-            # x_proj_dec = self.linear_emb(torch.cat((x_grad, out.unsqueeze(1).repeat(1, x.shape[1], 1)), -1))                 # (B, N, d_model)
+
         else:
             x_grad = None
             x_proj_enc = x_proj_dec = self.linear_emb(torch.cat((x, out.unsqueeze(1).repeat(1, x.shape[1], 1)), -1))
-            if USE_EMB:
-                label_emb = self.embedding(x_label)        # (B, N, d_model)
-                x_proj_enc = x_proj_enc + label_emb
-            
 
         e_outputs = self.encoder(x_proj_enc)
 
         d_output_phi = self.decoder_phi(x_proj_dec, e_outputs)
-        d_output_flow = self.decoder_phi(x_proj_dec[:, :_BND_END], e_outputs[:, :_BND_END])
+        d_output_flow = self.decoder_flow(x_proj_dec[:, :_BND_END], e_outputs[:, :_BND_END])
 
         phi_pred = self.linear_out_phi(d_output_phi)
         v = self.linear_out_v(d_output_flow)
@@ -314,46 +275,79 @@ class GAPinn(nn.Module):
 
 ga_pinn = GAPinn().cuda()
 
-if RESUME_PINN:
-    resume_task = Task.get_task(task_id='35047f311ba44502bf6e397b6d262703',
-        project_name='kornaeva-rnf/GA_PINN_3D'
-    )
+if TRAIN_PINN:
+    if RESUME_PINN:
+        if not LOCAL:
+            resume_task = Task.get_task(task_id='14b9427c14da4b1f8daf8ee1cd988daf',
+                project_name='kornaeva-rnf/GA_PINN_3D'
+            )
 
-    history_path = resume_task.artifacts['history'].get_local_copy()
-    model_path = resume_task.artifacts['model'].get_local_copy()    
-    optimizer_path = resume_task.artifacts['optimizer'].get_local_copy()
-    ga_pinn.load_state_dict(torch.load(model_path))
-
+            history_path = resume_task.artifacts['history'].get_local_copy()
+            model_path = resume_task.artifacts['model'].get_local_copy()    
+            optimizer_path = resume_task.artifacts['optimizer'].get_local_copy()
+            ga_pinn.load_state_dict(torch.load(model_path))
+        else:
+            ga_pinn.load_state_dict(torch.load(f'{MODELS_PATH}/mlp_pinn.pth'))
+    else:
+        ga_pinn.load_state_dict(torch.load(f'{MODELS_PATH}/mlp_dist.pth'))
+else:
+    pass
+    ga_pinn.load_state_dict(torch.load('mlp_pinn.pth'))
 
 dataset = Dataset(DATASET_PATH)
 
 loader = torch.utils.data.DataLoader(dataset, batch_size=B, shuffle=True)
 
-optimizer_phi = torch.optim.Adam([*ga_pinn.linear_emb.parameters(), *ga_pinn.encoder.parameters(), *ga_pinn.decoder_phi.parameters(), *ga_pinn.linear_out_phi.parameters()], lr=5e-4)
-optimizer_flow = torch.optim.Adam([*ga_pinn.linear_out_v.parameters(), *ga_pinn.linear_out_p.parameters()], lr=5e-4)
+if TRAIN_PINN:
+    if RESUME_PINN:
+        # optimizer = torch.optim.Adam([*ga_pinn.transformer_decoder_flow.parameters(), *ga_pinn.vel_head.parameters(), *ga_pinn.p_head.parameters()], lr=5e-5)
+        optimizer = torch.optim.Adam([*ga_pinn.decoder_phi.parameters(), *ga_pinn.linear_out_v.parameters(), *ga_pinn.linear_out_p.parameters()], lr=1e-3)
+        if not LOCAL:
+            optimizer.load_state_dict(torch.load(optimizer_path))
+        else:
+            optimizer.load_state_dict(torch.load(f'{MODELS_PATH}/optimizer_pinn.pth'))
+    else:
+        # optimizer = torch.optim.Adam([*ga_pinn.transformer_decoder_flow.parameters(), *ga_pinn.vel_head.parameters(), *ga_pinn.p_head.parameters()], lr=1e-3)
+        optimizer = torch.optim.Adam([*ga_pinn.decoder_phi.parameters(), *ga_pinn.linear_out_v.parameters(), *ga_pinn.linear_out_p.parameters()], lr=1e-3)
+     
+else:
+    optimizer_phi = torch.optim.Adam([*ga_pinn.linear_emb.parameters(), *ga_pinn.encoder.parameters(), *ga_pinn.decoder_phi.parameters(), *ga_pinn.linear_out_phi.parameters()], lr=5e-4)
+    optimizer_flow = torch.optim.Adam([*ga_pinn.decoder_flow.parameters(), *ga_pinn.linear_out_v.parameters(), *ga_pinn.linear_out_p.parameters()], lr=5e-4)
 
-if RESUME_PINN:
-    optimizer_flow.load_state_dict(torch.load(optimizer_path))
+    optimizer_phi.load_state_dict(torch.load('optimizer_dist.pth'))
+    optimizer_flow.load_state_dict(torch.load('optimizer_pinn.pth'))
 
-lr_scheduler_phi = torch.optim.lr_scheduler.StepLR(optimizer_phi, 100, 0.97,
-                                                    last_epoch=- 1)
-lr_scheduler_flow = torch.optim.lr_scheduler.StepLR(optimizer_flow, 100, 0.97,
-                                                    last_epoch=- 1)
+if TRAIN_PINN:
+    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 200, 0.97,
+                                                        last_epoch=- 1)
+else:
+    lr_scheduler_phi = torch.optim.lr_scheduler.StepLR(optimizer_phi, 100, 0.97,
+                                                        last_epoch=- 1)
+    lr_scheduler_flow = torch.optim.lr_scheduler.StepLR(optimizer_flow, 100, 0.97,
+                                                        last_epoch=- 1)
+
 loss_fcn = torch.nn.MSELoss()
 
-history = {'res_1': [], 'res_2': [], 'res_3': [], 'res_4': [], 'mse_out': [], 'mse_phi': [], 'lr_flow': [], 'lr_phi': []}
+if TRAIN_PINN:
+    if RESUME_PINN:
+        if not LOCAL:
+            with open(history_path, 'r') as fp:
+               history = json.load(fp)
+        else:
+            with open(f'{MODELS_PATH}/history_pinn.json', 'r') as fp:
+               history = json.load(fp)
+    else:
+        history = {'res_1': [], 'res_2': [], 'res_3': [], 'res_4': [], 'mse_out': [], 'mse_phi': [], 'lr_flow': [], 'lr_phi': []}
+else:
+    history = {'res_1': [], 'res_2': [], 'res_3': [], 'res_4': [], 'mse_out': [], 'mse_phi': [], 'lr_flow': [], 'lr_phi': []}
 
-if RESUME_PINN:
-    with open(history_path, 'r') as fp:
+    with open(f'{MODELS_PATH}/history_pinn.json', 'r') as fp:
         history = json.load(fp)
 
 logger = task.get_logger()
 
-tmp = len(history['res_1']) + len(history['mse_phi'])
 
-flag = True
-
-for i in tqdm(range(tmp, tmp + 10000)):
+for i in tqdm(range(3035, 40000)):
     ga_pinn.train()
 
     epoch_sums = {'res_1': 0., 'res_2': 0., 'res_3': 0., 'res_4': 0.,
@@ -365,9 +359,9 @@ for i in tqdm(range(tmp, tmp + 10000)):
             x.to('cuda'), phi.to('cuda'), out.to('cuda'), norm_in.to('cuda'), norm_out.to('cuda'), center_out.to('cuda'), l.to('cuda'), s.to('cuda'), v_mean.to('cuda'), x_label.to('cuda')
         
         def closure():
-            out_pred, phi_pred, v1, v2, v3, p, x_grad = ga_pinn(x, norm_in, norm_out, center_out, l, s, v_mean, x_label, pinn=bool((i % 2) or (i >= 5000)))
+            out_pred, phi_pred, v1, v2, v3, p, x_grad = ga_pinn(x, norm_in, norm_out, center_out, l, s, v_mean, x_label, pinn=bool((i % 2) or (i > 3100)))
 
-            if (i % 2) or (i >= 5000):
+            if (i % 2) or (i > 3100):
                 dv1, dv2, dv3, d2v1, d2v2, d2v3, dp = calc_grad(v1, v2, v3, p, x_grad)
 
                 res = calc_res(v1, v2, v3, p, dv1, dv2, dv3, d2v1, d2v2, d2v3, dp)
@@ -386,7 +380,7 @@ for i in tqdm(range(tmp, tmp + 10000)):
 
             loss.backward()
 
-            if (i % 2) or (i >= 5000):
+            if (i % 2) or (i > 3100):
                 epoch_sums['res_1'] += mse_zero_loss(res[0].detach().cpu()).item()
                 # epoch_sums['res_2'] += mse_zero_loss(res[1].detach().cpu()).item()
                 # epoch_sums['res_3'] += mse_zero_loss(res[2].detach().cpu()).item()
@@ -397,14 +391,14 @@ for i in tqdm(range(tmp, tmp + 10000)):
 
             return loss
         
-        if (i % 2) or (i >= 5000):
+        if (i % 2) or (i > 3100):
             optimizer_flow.step(closure)
         else:
             optimizer_phi.step(closure)
 
         n_batches += 1
 
-    if (i % 2) or (i >= 5000):
+    if (i % 2) or (i > 3100):
         for key in ['res_1']:
             mean_val = epoch_sums[key] / n_batches
             history[key].append(mean_val)
@@ -421,12 +415,7 @@ for i in tqdm(range(tmp, tmp + 10000)):
     with open('history_pinn.json', 'w') as fp:
         json.dump(history, fp)
 
-    if (i % 2) or (i >= 5000):
-        if (i >= 5000) and flag:
-            flag = False
-            lr_scheduler_flow = torch.optim.lr_scheduler.StepLR(optimizer_flow, 400, 0.97,
-                                                    last_epoch=- 1)
-
+    if (i % 2) or (i > 3100):
         lr_scheduler_flow.step()
         lr_flow = optimizer_flow.param_groups[0]['lr']
         logger.report_scalar(title='Learning Rate', series='lr_flow', value=lr_flow, iteration=i)
@@ -437,6 +426,11 @@ for i in tqdm(range(tmp, tmp + 10000)):
         logger.report_scalar(title='Learning Rate', series='lr_phi', value=lr_phi, iteration=i)
         history['lr_phi'].append(lr_phi)
 
-task.upload_artifact(f'model', artifact_object='mlp_pinn.pth')
-task.upload_artifact(f'history', artifact_object='history_pinn.json')
-task.upload_artifact(f'optimizer', artifact_object='optimizer_pinn.pth')
+if TRAIN_PINN:
+    task.upload_artifact(f'model', artifact_object='mlp_pinn.pth')
+    task.upload_artifact(f'history', artifact_object='history_pinn.json')
+    task.upload_artifact(f'optimizer', artifact_object='optimizer_pinn.pth')
+else:
+    task.upload_artifact(f'model', artifact_object='mlp_dist.pth')
+    task.upload_artifact(f'history', artifact_object='history_dist.json')
+    task.upload_artifact(f'optimizer', artifact_object='optimizer_dist.pth')
