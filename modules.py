@@ -3,23 +3,28 @@ import torch
 from stl import mesh
 from torch import autograd
 
-def calc_grad(v1, v2, v3, p, x):
+def calc_grad(v1, v2, v3, p, x, div_v_only=True):
     dv1 = autograd.grad(v1.sum(), x, create_graph=True)[0]
     dv2 = autograd.grad(v2.sum(), x, create_graph=True)[0]
     dv3 = autograd.grad(v3.sum(), x, create_graph=True)[0]
     dp = autograd.grad(p.sum(), x, create_graph=True)[0]
-    # d2v1 = autograd.grad(dv1.sum(), x, create_graph=True)[0]
-    # d2v2 = autograd.grad(dv2.sum(), x, create_graph=True)[0]
-    # d2v3 = autograd.grad(dv3.sum(), x, create_graph=True)[0]
-    return dv1, dv2, dv3, dv1, dv2, dv3, dp
+    if div_v_only:
+        return dv1, dv2, dv3, dv1, dv2, dv3, dp
+    d2v1 = autograd.grad(dv1.sum(), x, create_graph=True)[0]
+    d2v2 = autograd.grad(dv2.sum(), x, create_graph=True)[0]
+    d2v3 = autograd.grad(dv3.sum(), x, create_graph=True)[0]
+    return dv1, dv2, dv3, d2v1, d2v2, d2v3, dp
 
-def calc_res(v1, v2, v3, p, dv1, dv2, dv3, d2v1, d2v2, d2v3, dp):
+def calc_res(v1, v2, v3, p, dv1, dv2, dv3, d2v1, d2v2, d2v3, dp, div_v_only=True):
     mu = 3e-3
     rho = 1050
-    # res1 = (v1 * dv1[..., 0:1] + v2 * dv1[..., 1:2] + v3 * dv1[..., 2:3]) - mu * (d2v1[..., 0:1] + d2v1[..., 1:2] + d2v1[..., 2:3]) / rho + dp[..., 0:1] / rho
-    # res2 = (v1 * dv2[..., 0:1] + v2 * dv2[..., 1:2] + v3 * dv2[..., 2:3]) - mu * (d2v2[..., 0:1] + d2v2[..., 1:2] + d2v2[..., 2:3]) / rho + dp[..., 1:2] / rho
-    # res3 = (v1 * dv3[..., 0:1] + v2 * dv3[..., 1:2] + v3 * dv3[..., 2:3]) - mu * (d2v3[..., 0:1] + d2v3[..., 1:2] + d2v3[..., 2:3]) / rho + dp[..., 2:3] / rho
+    if not div_v_only:
+        res1 = (v1 * dv1[..., 0:1] + v2 * dv1[..., 1:2] + v3 * dv1[..., 2:3]) - mu * (d2v1[..., 0:1] + d2v1[..., 1:2] + d2v1[..., 2:3]) / rho + dp[..., 0:1] / rho
+        res2 = (v1 * dv2[..., 0:1] + v2 * dv2[..., 1:2] + v3 * dv2[..., 2:3]) - mu * (d2v2[..., 0:1] + d2v2[..., 1:2] + d2v2[..., 2:3]) / rho + dp[..., 1:2] / rho
+        res3 = (v1 * dv3[..., 0:1] + v2 * dv3[..., 1:2] + v3 * dv3[..., 2:3]) - mu * (d2v3[..., 0:1] + d2v3[..., 1:2] + d2v3[..., 2:3]) / rho + dp[..., 2:3] / rho
     res4 = dv1[..., 0:1] + dv2[..., 1:2] + dv3[..., 2:3]
+    if not div_v_only:
+        return [res1, res2, res3, res4]    
     return [res4]
 
 def mse_zero_loss(f):
@@ -32,41 +37,100 @@ def zero_loss(outputs):
     loss = loss / len(outputs)
     return loss
 
-def dist(a, b):
-    return ((a - b) ** 2).sum(axis=1) ** 0.5
+def point_to_triangles_distance(
+    points,               # (P, 3)
+    triangles,            # (T, 3, 3)
+    point_chunk_size = 200,
+    triangle_chunk_size = 10000
+):
+    """
+    Returns:
+        sum_dist: (P,) — сумма расстояний от каждой точки до всех треугольников
+    """
+    P = points.shape[0]
+    T = triangles.shape[0]
+
+    p_chunk = point_chunk_size    or P
+    t_chunk = triangle_chunk_size or T
+
+    sum_dist = torch.zeros(P, dtype=points.dtype, device=points.device)
+
+    for p_start in range(0, P, p_chunk):
+        p_end = min(p_start + p_chunk, P)
+        p = points[p_start:p_end].unsqueeze(1)   # (Cp, 1, 3)
+
+        for t_start in range(0, T, t_chunk):
+            t_end = min(t_start + t_chunk, T)
+            tri   = triangles[t_start:t_end]      # (Ct, 3, 3)
+
+            a  = tri[:, 0].unsqueeze(0)
+            b  = tri[:, 1].unsqueeze(0)
+            c  = tri[:, 2].unsqueeze(0)
+            ab = b - a
+            ac = c - a
+            ap = p - a
+
+            d1 = (ab * ap).sum(-1)
+            d2 = (ac * ap).sum(-1)
+            bp = p - b
+            d3 = (ab * bp).sum(-1)
+            d4 = (ac * bp).sum(-1)
+            cp = p - c
+            d5 = (ab * cp).sum(-1)
+            d6 = (ac * cp).sum(-1)
+
+            va = d3 * d6 - d5 * d4
+            vb = d5 * d2 - d1 * d6
+            vc = d1 * d4 - d3 * d2
+
+            mask_a  = (d1 <= 0) & (d2 <= 0)
+            mask_b  = (d3 >= 0) & (d4 <= d3)
+            mask_c  = (d6 >= 0) & (d5 <= d6)
+            mask_ab = (vc <= 0) & (d1 >= 0) & (d3 <= 0)
+            mask_ac = (vb <= 0) & (d2 >= 0) & (d6 <= 0)
+            mask_bc = (va <= 0) & ((d4 - d3) >= 0) & ((d5 - d6) >= 0)
+
+            t_ab = (d1 / (d1 - d3).clamp(min=1e-10)).clamp(0.0, 1.0)
+            t_ac = (d2 / (d2 - d6).clamp(min=1e-10)).clamp(0.0, 1.0)
+            t_bc = ((d4 - d3) / ((d4 - d3) + (d5 - d6)).clamp(min=1e-10)).clamp(0.0, 1.0)
+
+            denom   = (va + vb + vc).clamp(min=1e-10)
+            closest = a + (vb / denom).unsqueeze(-1) * ab + (vc / denom).unsqueeze(-1) * ac
+
+            Cp = p_end - p_start
+            Ct = t_end - t_start
+            closest = torch.where(mask_bc.unsqueeze(-1), b + t_bc.unsqueeze(-1) * (c - b), closest)
+            closest = torch.where(mask_ac.unsqueeze(-1), a + t_ac.unsqueeze(-1) * ac,       closest)
+            closest = torch.where(mask_ab.unsqueeze(-1), a + t_ab.unsqueeze(-1) * ab,       closest)
+            closest = torch.where(mask_c.unsqueeze(-1),  c.expand(Cp, Ct, 3),               closest)
+            closest = torch.where(mask_b.unsqueeze(-1),  b.expand(Cp, Ct, 3),               closest)
+            closest = torch.where(mask_a.unsqueeze(-1),  a.expand(Cp, Ct, 3),               closest)
+
+            # Суммируем по треугольникам прямо здесь — (Cp,)
+            sum_dist[p_start:p_end] += (1.0 / (p - closest).norm(dim=-1).pow(2).clamp(min=1e-10)).sum(dim=-1)
+
+            del a, b, c, ab, ac, ap, bp, cp
+            del d1, d2, d3, d4, d5, d6
+            del va, vb, vc
+            del mask_a, mask_b, mask_c, mask_ab, mask_ac, mask_bc
+            del t_ab, t_ac, t_bc, denom, closest
+
+    return sum_dist
 
 
-def lin_seg(x, x_c):
-    return dist(x, x_c)
-
-def phi(x, segments, m=3.):
-    tmp = 1 / (lin_seg(x, segments[0]) ** m)
-    for i in range(1, len(segments)):
-        phi_ = lin_seg(x, segments[i])
-        tmp = tmp + 1 / (phi_ ** m)
+def phi(x, segments, m=2.):
+    tmp = point_to_triangles_distance(x, segments)
     x = None
     segments = None
     return 1 / (tmp ** (1 / m))
 
-def lin_seg_(x, x_seg):
-    # d = ((x_seg[0] - x_seg[1]) ** 2).sum() ** 0.5
-    v1 = x_seg[1] - x_seg[0]
-    v2 = x_seg[2] - x_seg[0]
-    
-    normal = np.cross(v1, v2)
-    d = np.linalg.norm(normal) / 2
-    x_c = x_seg.mean(axis=0)
-    f = torch.tensor(np.dot(x - x_seg[0], normal) / d)
-    t = (1 / d) * ((d / 2.) ** 2 - dist(x, x_c) ** 2)
-    varphi = (t ** 2 + f ** 4) ** 0.5
-    tmp = (f ** 2 + (1 / 4.) * (varphi - t) ** 2) ** 0.5
-    return tmp
 
 def calc_phi(x, segments):
     phi_seg = phi(x, segments).cpu()
     x = None
     segments = None
     return phi_seg
+
 
 def get_point_from_segment(points, segment, n, x3=None):
     delta = segment[1] - segment[0]
@@ -142,7 +206,6 @@ def sample_boundary_points_from_stl(path, centering, max_coord, m_all, return_no
     mesh_ = mesh.Mesh.from_file(path)
 
     points = torch.tensor(np.array(mesh_.points))
-    # [~np.isclose(mesh_.normals[:, 0], 0., rtol=1e-07, atol=1e-10) & (np.isclose(mesh_.normals[:, 1], 0., rtol=1e-07, atol=1e-10))])
 
     points[:, :3] -= centering.cpu().numpy()
     points[:, 3:6] -= centering.cpu().numpy()
@@ -151,7 +214,6 @@ def sample_boundary_points_from_stl(path, centering, max_coord, m_all, return_no
     points = points / max_coord.cpu().numpy() / 2
 
     areas = torch.tensor(np.array(mesh_.areas))
-    # [~np.isclose(mesh_.normals[:, 0], 0., rtol=1e-07, atol=1e-10) & (np.isclose(mesh_.normals[:, 1], 0., rtol=1e-07, atol=1e-10))])
 
     areas_all = areas.sum()
 
@@ -171,13 +233,13 @@ def sample_boundary_points_from_stl(path, centering, max_coord, m_all, return_no
     return x
 
 
-def load_stl(path, n=64, n_interior=5000000, n_walls=10000, n_inlet=10000, n_outlet=10000, odd=False, length=[1., 1., 1.], device='cpu', use_3d=True, inside_buffer=0.001, gen_int_p=True):
+def load_stl(path, n=50, n_interior=2000000, n_interior_phi=100000, n_outerior=100000, n_walls=100000, n_inlet=20000, n_outlet=20000, odd=False, length=[1., 1., 1.], device='cpu', inside_buffer=0.001, gen_p=True):
     x_dict = {}
     phi_w_dict = {}
     phi_in_dict = {}
+    phi_out_dict = {}
     n_dict = {}
     
-    print(f'Mask generation with path: {path}')
     closed_mesh = mesh.Mesh.from_file(path)
     
     centering = torch.zeros(3).to(device)
@@ -196,36 +258,30 @@ def load_stl(path, n=64, n_interior=5000000, n_walls=10000, n_inlet=10000, n_out
 
     closed_points = closed_points / max_coord / 2
 
-    x1 = torch.linspace(-length[0] / 2, length[0] / 2, n)
-    x2 = torch.linspace(-length[1] / 2, length[1] / 2, n) if use_3d else torch.tensor(0.001 * length[1])
-    x3 = torch.linspace(-length[2] / 2, length[2] / 2, n)
+    print(f'Outerior points generation with path: {path}')
 
-    x1, x2, x3 = torch.meshgrid(x1, x2, x3, indexing='ij')
+    if gen_p:
+        x1 = torch.linspace(-length[0] / 2, length[0] / 2, n)
+        x2 = torch.linspace(-length[1] / 2, length[1] / 2, n)
+        x3 = torch.linspace(-length[2] / 2, length[2] / 2, n)
 
-    dx = torch.tensor([closed_points[:, ::3].max() - closed_points[:, ::3].min(),
-                       closed_points[:, 1::3].max() - closed_points[:, 1::3].min(),
-                       closed_points[:, 2::3].max() - closed_points[:, 2::3].min()]).to(device)
-    
-    x = torch.stack([x1, x2, x3])
-    x = x.reshape(3, -1).T.to(device)
+        x1, x2, x3 = torch.meshgrid(x1, x2, x3, indexing='ij')
 
-    mask = is_inside(zip(closed_points[:, :3], 
-                         closed_points[:, 3:6],
-                         closed_points[:, 6:9]), x, inside_buffer)
-    x_dict['outerior'] = x.cpu()[~mask.cpu()]
-    mask = mask.reshape(n, n, n).cpu() if use_3d else mask.reshape(n, n).cpu()
-    mask = {'num': mask.float(), 'bool': mask}
-    
-    print('done\n\nInterior points generation')
-    if gen_int_p:
-        x = (torch.rand(int(0.2 * n_interior), 3) * dx.cpu() * 1.1 - (dx.cpu() * 1.1 / 2)).to(device)
-        mask_ = is_inside(zip(closed_points[:, :3], 
+        x = torch.stack([x1, x2, x3])
+        x = x.reshape(3, -1).T.to(device)
+
+        mask = is_inside(zip(closed_points[:, :3], 
                             closed_points[:, 3:6],
                             closed_points[:, 6:9]), x, inside_buffer)
+        x_dict['outerior'] = x.cpu()[~mask.cpu()]
+        x_dict['outerior'] = x_dict['outerior'][torch.randperm(len(x_dict['outerior']))[:n_outerior]]
         
-        x = x[mask_]
+        
+        print('done\n\nInterior points generation')
+
+        x = x[mask]
         x = x.repeat(int(n_interior * 1.3 / len(x)), 1)
-        x = x + ((torch.rand(*x.shape).to(device) - 0.5) * dx * 0.05)
+        x = x + ((torch.rand(*x.shape).to(device) - 0.5) / n)
 
         mask_ = is_inside(zip(closed_points[:, :3], 
                             closed_points[:, 3:6],
@@ -235,61 +291,158 @@ def load_stl(path, n=64, n_interior=5000000, n_walls=10000, n_inlet=10000, n_out
         x_dict['interior'] = x_dict['interior'][torch.randperm(len(x_dict['interior']))[:n_interior]]
 
         closed_mesh = None
-        closed_points = closed_points.cpu()
+        closed_points = None
         x1 = None 
         x2 = None
         x3 = None
         dx = None
         x = None
         mask_ = None
-        torch.save(x_dict['interior'], path.replace('.stl', '.pt'))
+        torch.save(x_dict['interior'], path.replace('.stl', '_interior.pt'))
+        torch.save(x_dict['outerior'], path.replace('.stl', '_outerior.pt'))
     else:
-        x_dict['interior'] = torch.load(path.replace('.stl', '.pt'))
+        print('done\n\nInterior points generation')
+        x_dict['interior'] = torch.load(path.replace('.stl', '_interior.pt'))
+        x_dict['outerior'] = torch.load(path.replace('.stl', '_outerior.pt'))
+
+    tr_walls = mesh.Mesh.from_file(path.replace('.stl', '_3.stl'))
     
+    tr_walls = torch.tensor(np.array(tr_walls.points)).to(device)
+
+    tr_walls[:, :3] -= centering
+    tr_walls[:, 3:6] -= centering
+    tr_walls[:, 6:9] -= centering
+
+    tr_walls = tr_walls / max_coord / 2
+    tr_walls = tr_walls.reshape(-1, 3, 3)
+
+    tr_in = mesh.Mesh.from_file(path.replace('.stl', '_1.stl' if odd else '_2.stl'))
+    
+    tr_in = torch.tensor(np.array(tr_in.points)).to(device)
+
+    tr_in[:, :3] -= centering
+    tr_in[:, 3:6] -= centering
+    tr_in[:, 6:9] -= centering
+
+    tr_in = tr_in / max_coord / 2
+    tr_in = tr_in.reshape(-1, 3, 3)
+
+    tr_out = mesh.Mesh.from_file(path.replace('.stl', '_1.stl' if odd else '_2.stl'))
+    
+    tr_out = torch.tensor(np.array(tr_out.points)).to(device)
+
+    tr_out[:, :3] -= centering
+    tr_out[:, 3:6] -= centering
+    tr_out[:, 6:9] -= centering
+
+    tr_out = tr_out / max_coord / 2
+    tr_out = tr_out.reshape(-1, 3, 3)
+
     print('done\n\nInlet points generation')
-    x_dict['inlet'], n_dict['inlet'], s = sample_boundary_points_from_stl(path.replace('.stl', '_1.stl' if odd else '_2.stl'), centering, max_coord, int(n_inlet * 1.1), return_norm=True)
+    x_dict['inlet'], n_dict['inlet'], s_in = sample_boundary_points_from_stl(path.replace('.stl', '_1.stl' if odd else '_2.stl'), centering, max_coord, int(n_inlet * 1.1), return_norm=True)
     print('done\n\nOutlet points generation')
-    x_dict['outlet'], n_dict['outlet'], _ = sample_boundary_points_from_stl(path.replace('.stl', '_2.stl' if odd else '_1.stl'), centering, max_coord, int(n_outlet * 1.1), return_norm=True)
+    x_dict['outlet'], n_dict['outlet'], s_out = sample_boundary_points_from_stl(path.replace('.stl', '_2.stl' if odd else '_1.stl'), centering, max_coord, int(n_outlet * 1.1), return_norm=True)
     n_dict['inlet_center'] = x_dict['inlet'].mean(0)
     n_dict['outlet_center'] = x_dict['outlet'].mean(0)
     
     print('done\n\nWalls points generation')
     x_dict['walls'] = sample_boundary_points_from_stl(path.replace('.stl', '_3.stl'), centering, max_coord, int(n_walls * 1.1))
     print('done\n\n')
-    if not use_3d:
-        x_dict['interior'] = x_dict['interior'][:, ::2]
-        x_dict['walls'] = x_dict['walls'][:, ::2]
-        x_dict['inlet'] = x_dict['inlet'][:, ::2]
-        x_dict['outlet'] = x_dict['outlet'][:, ::2]
-        x_q_fix = x_q_fix[:, ::2]
 
     x_dict['walls'] = x_dict['walls'][torch.randperm(len(x_dict['walls']))[:n_walls]]
     x_dict['inlet'] = x_dict['inlet'][torch.randperm(len(x_dict['inlet']))[:n_inlet]]
     x_dict['outlet'] = x_dict['outlet'][torch.randperm(len(x_dict['outlet']))[:n_outlet]]
 
-    phi_w_dict['interior'] = calc_phi(x_dict['interior'].to(device), x_dict['walls'].to(device))
+    phi_w_dict['interior'] = calc_phi(x_dict['interior'][:n_interior_phi].to(device), tr_walls)
     max_phi_w = phi_w_dict['interior'].max()
     phi_w_dict['interior'] = phi_w_dict['interior'] / max_phi_w
-    phi_w_dict['outerior'] = - calc_phi(x_dict['outerior'].to(device), x_dict['walls'].to(device)) / max_phi_w
-    phi_w_dict['inlet'] = calc_phi(x_dict['inlet'].to(device), x_dict['walls'].to(device)) / max_phi_w
-    phi_w_dict['outlet'] = calc_phi(x_dict['outlet'].to(device), x_dict['walls'].to(device)) / max_phi_w
+    phi_w_dict['outerior'] = - calc_phi(x_dict['outerior'].to(device), tr_walls) / max_phi_w
+    phi_w_dict['inlet'] = calc_phi(x_dict['inlet'].to(device), tr_walls) / max_phi_w
+    phi_w_dict['outlet'] = calc_phi(x_dict['outlet'].to(device), tr_walls) / max_phi_w
     phi_w_dict['walls'] = torch.zeros(len(x_dict['walls']))
 
-    phi_in_dict['interior'] = calc_phi(x_dict['interior'].to(device), torch.cat((x_dict['walls'], x_dict['inlet'])).to(device))
+    phi_in_dict['interior'] = calc_phi(x_dict['interior'][:n_interior_phi].to(device), torch.cat((tr_walls, tr_in), 0))
     max_phi_in = phi_in_dict['interior'].max()
     phi_in_dict['interior'] = phi_in_dict['interior'] / max_phi_in
-    phi_in_dict['outerior'] = - calc_phi(x_dict['outerior'].to(device), torch.cat((x_dict['walls'], x_dict['inlet'])).to(device)) / max_phi_in
+    phi_in_dict['outerior'] = - calc_phi(x_dict['outerior'].to(device), torch.cat((tr_walls, tr_in), 0)) / max_phi_in
     phi_in_dict['inlet'] = torch.zeros(len(x_dict['inlet']))
-    phi_in_dict['outlet'] = calc_phi(x_dict['outlet'].to(device), torch.cat((x_dict['walls'], x_dict['inlet'])).to(device))  / max_phi_in
+    phi_in_dict['outlet'] = calc_phi(x_dict['outlet'].to(device), torch.cat((tr_walls, tr_in), 0))  / max_phi_in
     phi_in_dict['walls'] = torch.zeros(len(x_dict['walls']))
 
-    # closed_points_tmp = []
+    phi_out_dict['interior'] = calc_phi(x_dict['interior'][:n_interior_phi].to(device), torch.cat((tr_walls, tr_out), 0))
+    max_phi_in = phi_out_dict['interior'].max()
+    phi_out_dict['interior'] = phi_out_dict['interior'] / max_phi_in
+    phi_out_dict['outerior'] = - calc_phi(x_dict['outerior'].to(device), torch.cat((tr_walls, tr_out), 0)) / max_phi_in
+    phi_out_dict['inlet'] = torch.zeros(len(x_dict['outlet']))
+    phi_out_dict['outlet'] = calc_phi(x_dict['inlet'].to(device), torch.cat((tr_walls, tr_out), 0))  / max_phi_in
+    phi_out_dict['walls'] = torch.zeros(len(x_dict['walls']))
 
-    # for point in closed_points:
-    #     if point[2].cpu() < 0.1 and point[2].cpu() > -0.01:
-    #         closed_points_tmp.append(torch.stack([point[:3].cpu(), point[3:6].cpu(), point[6:9].cpu()]))
-    # # closed_points.shape
+    agg_dict = {'x_dict': x_dict, 'phi_w_dict': phi_w_dict, 'phi_in_dict': phi_in_dict, 'phi_out_dict': phi_out_dict, 'n_dict': n_dict, 'l': max_coord / 1000, 's_in': s_in, 's_out': s_out, 'v_mean_in': torch.norm(phi_w_dict['inlet'].mean() * n_dict['inlet']), 'v_mean_out': torch.norm(phi_w_dict['outlet'].mean() * n_dict['outlet'])}
 
-    agg_dict = {'mask': mask, 'x_dict': x_dict, 'phi_w_dict': phi_w_dict, 'phi_in_dict': phi_in_dict, 'n_dict': n_dict, 'l': max_coord / 1000, 's': s, 'v_mean': torch.norm(phi_w_dict['inlet'].mean() * n_dict['inlet'])}
+    tr_walls = None
+    tr_in = None
+
+    torch.cuda.empty_cache()
 
     return agg_dict
+
+
+class SaveBest():
+    """Callback for save model if there is an improvement.
+    
+    Args:
+        monitor (str): value for monitoring.
+        model_path (str): Path for saving model.
+        mode (str): One of {"min", "max"}. In min mode, training will stop when the quantity monitored has stopped decreasing.
+            In "max" mode it will stop when the quantity monitored has stopped increasing.
+    
+    Attributes:
+        history (dict): Dict of lists with train history. Key "monitor" contains list of monitoring values. 
+        steps (int): Number of passed epoches. 
+        best_step (int): Number of best epoch. 
+        best_monitor (float): Best of monitoring value.
+        model (Model): Training model
+    """
+    
+    def __init__(self, monitor, model_path, mode):
+        self.monitor = monitor
+        self.model_path = model_path
+        self.mode = mode
+        self.history = None
+        self.best_monitor = None
+    
+    def start(self, history, model):
+        """Start and init callback. Save first version of model.
+        
+        Args:
+            history (dict): Dict of lists with train history. Key "monitor" contains list of monitoring values. 
+            model (Model): Training model
+        """
+        
+        self.history = history
+        self.model = model
+        torch.save(self.model.state_dict(), self.model_path)
+    
+    def step(self):
+        """Make a step of callback.
+        
+        Returns:
+            tuple: (event, stop):
+                event (str): Decription of event. If event not did not happen then event = ''.
+                stop (bool): Flag of stopping train process.
+        """
+        
+        if self.mode == 'max':
+            if self.best_monitor is None or self.history[self.monitor][-1] > self.best_monitor:
+                self.best_monitor = self.history[self.monitor][-1]
+                torch.save(self.model.state_dict(), self.model_path)
+        elif self.mode == 'min':
+            if self.best_monitor is None or self.history[self.monitor][-1] < self.best_monitor:
+                self.best_monitor = self.history[self.monitor][-1]
+                torch.save(self.model.state_dict(), self.model_path)
+    
+    def stop(self):
+        """Delete model from callback."""
+        
+        self.model = None
+        torch.cuda.empty_cache()
