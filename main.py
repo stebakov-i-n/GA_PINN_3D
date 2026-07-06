@@ -4,6 +4,7 @@ import torch.nn as nn
 from tqdm import tqdm
 import json
 import copy
+from datetime import datetime
 from modules import *
 from clearml import Task, Dataset
 import os
@@ -16,8 +17,9 @@ torch.backends.cuda.enable_flash_sdp(False)
 torch.backends.cuda.enable_mem_efficient_sdp(False)
 torch.backends.cuda.enable_math_sdp(True)
 
-LOCAL = True
+LOCAL = False
 FULL_TRAIN = False
+USE_CLEARML = True
 
 USE_EMB = True
 ACT = 'wave'
@@ -36,30 +38,41 @@ _BND_START = INTERIOR_SIZE                                             # нач�
 _BND_END   = INTERIOR_SIZE + WALLS_SIZE + INLET_SIZE + OUTLET_SIZE    # конец non-outerior
 
 PHI_EPOCHS = 10000
-EPOCHS = 11000
+EPOCHS = 200
 DIV_POR = 5
 VAL_EVERY = 50
-B = 16
+B = 2
 
-RESUME_PINN = True
+RESUME_PINN = False
 RESUME_TASK = 'a6c0b9d0b4b44b918462644b3c35e3af'
 GEN_POINTS = False
 
 if not LOCAL:
-    task = Task.init(auto_connect_frameworks=False)
-
     dataset_train = Dataset.get(dataset_name='SimVascDataset', dataset_project='kornaeva-rnf/GA_PINN_3D')
     DATASET_PATH = dataset_train.get_local_copy()
-
-    dataset_train = Dataset.get(dataset_name='trained_models', dataset_project='kornaeva-rnf/GA_PINN_3D')
-    MODELS_PATH = dataset_train.get_local_copy()
 
     del dataset_train
 
 else:
-    task = Task.init(project_name='kornaeva-rnf/GA_PINN_3D', task_name='Test_1', auto_connect_frameworks=False)
-    MODELS_PATH = './'
     DATASET_PATH = 'SimVascDataset'
+
+RUN_NAME = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+SAVE_DIR = os.path.join('trained_models', RUN_NAME)
+os.makedirs(SAVE_DIR, exist_ok=True)
+
+if USE_CLEARML:
+    if not LOCAL:
+        task = Task.init(auto_connect_frameworks=False)
+    else:
+        task = Task.init(project_name='kornaeva-rnf/GA_PINN_3D', task_name='Test_1', auto_connect_frameworks=False)
+else:
+    task = None
+
+
+class _NullLogger:
+    """Заглушка логгера при USE_CLEARML=False, чтобы не ветвить вызовы report_scalar по коду."""
+    def report_scalar(self, *args, **kwargs):
+        pass
 
 if FULL_TRAIN:
     SPLIT = {'train': [], 'val': [], 'test': []}
@@ -68,6 +81,34 @@ if FULL_TRAIN:
     SPLIT['val'], SPLIT['test'] = train_test_split(SPLIT['val'], test_size=0.5, random_state=13)
 else:
     SPLIT = {'train': ["0145_H_CORO_KD", "0151_H_AO_H"], 'val': ["0096_A_AO_COA"], 'test': ["0209_H_CERE_CA"]}
+
+CONSTANTS = {
+    'LOCAL': LOCAL,
+    'FULL_TRAIN': FULL_TRAIN,
+    'USE_CLEARML': USE_CLEARML,
+    'USE_EMB': USE_EMB,
+    'ACT': ACT,
+    'INTERIOR_SIZE': INTERIOR_SIZE,
+    'WALLS_SIZE': WALLS_SIZE,
+    'INLET_SIZE': INLET_SIZE,
+    'OUTLET_SIZE': OUTLET_SIZE,
+    'OUTERIOR_SIZE': OUTERIOR_SIZE,
+    'Q': Q,
+    'S': S,
+    'PHI_EPOCHS': PHI_EPOCHS,
+    'EPOCHS': EPOCHS,
+    'DIV_POR': DIV_POR,
+    'VAL_EVERY': VAL_EVERY,
+    'B': B,
+    'RESUME_PINN': RESUME_PINN,
+    'RESUME_TASK': RESUME_TASK,
+    'GEN_POINTS': GEN_POINTS,
+    'DATASET_PATH': DATASET_PATH,
+    'SPLIT': SPLIT,
+}
+
+with open(os.path.join(SAVE_DIR, 'config.json'), 'w') as fp:
+    json.dump(CONSTANTS, fp, indent=2)
 
 
 class Dataset(torch.utils.data.Dataset):
@@ -303,7 +344,7 @@ class GAPinn(nn.Module):
             nn.Linear(d_hidden, 1)
         ])
 
-    def forward(self, x, norm_in, norm_out, center_out, l, s, v_mean, x_label, pinn=False):
+    def forward(self, x, out, norm_in, norm_out, center_out, l, s, v_mean, x_label, pinn=False):
 
         B = x.shape[0]
 
@@ -388,13 +429,13 @@ if RESUME_PINN:
         with open(history_val_path, 'r') as fp:
             history_val = json.load(fp)
 
-logger = task.get_logger()
+logger = task.get_logger() if USE_CLEARML else _NullLogger()
 
 complete_epochs = len(history['res_1']) + len(history['mse_phi'])
 
 flag = True
 
-save_callback = SaveBest('res_sum', "model_best.pth", 'min')
+save_callback = SaveBest('res_sum', os.path.join(SAVE_DIR, "model_best.pth"), 'min')
 save_callback.start(history, ga_pinn)
 
 def run_batches(loader, i, train):
@@ -407,8 +448,8 @@ def run_batches(loader, i, train):
 
     epoch_sums = {'res_1': 0., 'res_2': 0., 'res_3': 0., 'res_4': 0.,
                   'mse_out': 0., 'mse_phi': 0.}
-    epoch_counts = {key: 0 for key in epoch_sums}
-    n_batches = 0
+
+    is_flow_epoch = ((not (i % DIV_POR)) and train) or (i >= PHI_EPOCHS)
 
     for x, phi, out, norm_in, norm_out, center_out, l, s, v_mean, x_label in tqdm(loader):
         x, phi, out, norm_in, norm_out, center_out, l, s, v_mean, x_label = \
@@ -418,14 +459,12 @@ def run_batches(loader, i, train):
             optimizer_flow.zero_grad()
             optimizer_phi.zero_grad()
 
-        is_res_batch = (not (n_batches % DIV_POR)) or (i >= PHI_EPOCHS)
+        out_pred, phi_pred, v1, v2, v3, p, x_grad = ga_pinn(x, out, norm_in, norm_out, center_out, l, s, v_mean, x_label, pinn=bool(is_flow_epoch))
 
-        out_pred, phi_pred, v1, v2, v3, p, x_grad = ga_pinn(x, norm_in, norm_out, center_out, l, s, v_mean, x_label, pinn=bool(is_res_batch))
+        if is_flow_epoch:
+            dv1, dv2, dv3, d2v1, d2v2, d2v3, dp = calc_grad(v1, v2, v3, p, x_grad, div_v_only=i < PHI_EPOCHS)
 
-        if is_res_batch:
-            dv1, dv2, dv3, d2v1, d2v2, d2v3, dp = calc_grad(v1, v2, v3, p, x_grad, div_v_only=i >= PHI_EPOCHS)
-
-            res = calc_res(v1, v2, v3, p, dv1, dv2, dv3, d2v1, d2v2, d2v3, dp, div_v_only=i >= PHI_EPOCHS)
+            res = calc_res(v1, v2, v3, p, dv1, dv2, dv3, d2v1, d2v2, d2v3, dp, div_v_only=i < PHI_EPOCHS)
 
             loss = zero_loss(res)
         else:
@@ -436,41 +475,31 @@ def run_batches(loader, i, train):
         if train:
             loss.backward()
 
-        if is_res_batch:
+        if is_flow_epoch:
             epoch_sums['res_4'] += mse_zero_loss(res[0].detach().cpu()).item()
-            epoch_counts['res_4'] += 1
             if i >= PHI_EPOCHS:
                 epoch_sums['res_1'] += mse_zero_loss(res[1].detach().cpu()).item()
                 epoch_sums['res_2'] += mse_zero_loss(res[2].detach().cpu()).item()
                 epoch_sums['res_3'] += mse_zero_loss(res[3].detach().cpu()).item()
-                epoch_counts['res_1'] += 1
-                epoch_counts['res_2'] += 1
-                epoch_counts['res_3'] += 1
         else:
             epoch_sums['mse_phi'] += loss_phi.detach().cpu().item()
-            epoch_counts['mse_phi'] += 1
 
         if train:
-            if is_res_batch:
+            if is_flow_epoch:
                 optimizer_flow.step()
             else:
                 optimizer_phi.step()
 
-        n_batches += 1
-
-    is_flow_epoch = (not (n_batches % DIV_POR)) or (i >= PHI_EPOCHS)
-    return epoch_sums, epoch_counts, is_flow_epoch
+    return epoch_sums, is_flow_epoch
 
 
 def do_train(i):
-    global flag, lr_scheduler_flow
-
-    epoch_sums, epoch_counts, is_flow_epoch = run_batches(loader_train, i, train=True)
+    epoch_sums, is_flow_epoch = run_batches(loader_train, i, train=True)
 
     if is_flow_epoch:
         mean_val_sum = 0
-        for key in ['res_4', 'res_1', 'res_2', 'res_3'][:1 if i >= PHI_EPOCHS else 4]:
-            mean_val = epoch_sums[key] / epoch_counts[key]
+        for key in ['res_4', 'res_1', 'res_2', 'res_3'][:1 if i < PHI_EPOCHS else 4]:
+            mean_val = epoch_sums[key] / len(loader_train)
             history[key].append(mean_val)
             mean_val_sum += mean_val
             logger.report_scalar(title='Residuals', series=key, value=mean_val, iteration=i)
@@ -479,22 +508,17 @@ def do_train(i):
             save_callback.step()
     else:
         for key in ['mse_phi']:
-            mean_val = epoch_sums[key] / epoch_counts[key]
+            mean_val = epoch_sums[key] / len(loader_train)
             history[key].append(mean_val)
             logger.report_scalar(title='Losses', series=key, value=mean_val, iteration=i)
 
-    torch.save(ga_pinn.state_dict(), f'model.pth')
-    torch.save(optimizer_flow.state_dict(), f'optimizer_flow.pth')
-    torch.save(optimizer_phi.state_dict(), f'optimizer_phi.pth')
-    with open('history.json', 'w') as fp:
+    torch.save(ga_pinn.state_dict(), os.path.join(SAVE_DIR, 'model.pth'))
+    torch.save(optimizer_flow.state_dict(), os.path.join(SAVE_DIR, 'optimizer_flow.pth'))
+    torch.save(optimizer_phi.state_dict(), os.path.join(SAVE_DIR, 'optimizer_phi.pth'))
+    with open(os.path.join(SAVE_DIR, 'history.json'), 'w') as fp:
         json.dump(history, fp)
 
     if is_flow_epoch:
-        if (i >= PHI_EPOCHS) and flag:
-            flag = False
-            lr_scheduler_flow = torch.optim.lr_scheduler.StepLR(optimizer_flow, 400, 0.97,
-                                                    last_epoch=- 1)
-
         lr_scheduler_flow.step()
         lr_flow = optimizer_flow.param_groups[0]['lr']
         logger.report_scalar(title='Learning Rate', series='lr_flow', value=lr_flow, iteration=i)
@@ -507,12 +531,12 @@ def do_train(i):
 
 
 def do_val(i):
-    epoch_sums, epoch_counts, is_flow_epoch = run_batches(loader_val, i, train=False)
+    epoch_sums, is_flow_epoch = run_batches(loader_val, i, train=False)
 
     if is_flow_epoch:
         mean_val_sum = 0
         for key in ['res_4', 'res_1', 'res_2', 'res_3'][:1 if i >= PHI_EPOCHS else 4]:
-            mean_val = epoch_sums[key] / epoch_counts[key]
+            mean_val = epoch_sums[key] / len(loader_val)
             history_val[key].append(mean_val)
             mean_val_sum += mean_val
             logger.report_scalar(title='Residuals (val)', series=key, value=mean_val, iteration=i)
@@ -520,11 +544,11 @@ def do_val(i):
             history_val['res_sum'].append(mean_val_sum)
     else:
         for key in ['mse_phi']:
-            mean_val = epoch_sums[key] / epoch_counts[key]
+            mean_val = epoch_sums[key] / len(loader_val)
             history_val[key].append(mean_val)
             logger.report_scalar(title='Losses (val)', series=key, value=mean_val, iteration=i)
 
-    with open('history_val.json', 'w') as fp:
+    with open(os.path.join(SAVE_DIR, 'history_val.json'), 'w') as fp:
         json.dump(history_val, fp)
 
 
@@ -534,8 +558,20 @@ for i in tqdm(range(complete_epochs, complete_epochs + EPOCHS)):
     if i % VAL_EVERY == 0:
         do_val(i)
 
-task.upload_artifact(f'model', artifact_object='model.pth')
-task.upload_artifact(f'history', artifact_object='history.json')
-task.upload_artifact(f'history_val', artifact_object='history_val.json')
-task.upload_artifact(f'optimizer_phi', artifact_object='optimizer_phi.pth')
-task.upload_artifact(f'optimizer_flow', artifact_object='optimizer_flow.pth')
+    if (i >= PHI_EPOCHS) and flag:
+        flag = False
+        lr_scheduler_flow = torch.optim.lr_scheduler.StepLR(optimizer_flow, 400, 0.97,
+                                                last_epoch=- 1)
+
+        dataset_train.phi_stage = False
+        dataset_val.phi_stage = False
+
+        loader_train = torch.utils.data.DataLoader(dataset_train, batch_size=B, shuffle=True)
+        loader_val = torch.utils.data.DataLoader(dataset_val, batch_size=B, shuffle=False)
+
+if USE_CLEARML:
+    task.upload_artifact(f'model', artifact_object=os.path.join(SAVE_DIR, 'model.pth'))
+    task.upload_artifact(f'history', artifact_object=os.path.join(SAVE_DIR, 'history.json'))
+    task.upload_artifact(f'history_val', artifact_object=os.path.join(SAVE_DIR, 'history_val.json'))
+    task.upload_artifact(f'optimizer_phi', artifact_object=os.path.join(SAVE_DIR, 'optimizer_phi.pth'))
+    task.upload_artifact(f'optimizer_flow', artifact_object=os.path.join(SAVE_DIR, 'optimizer_flow.pth'))
