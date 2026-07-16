@@ -37,6 +37,48 @@ def zero_loss(outputs):
     loss = loss / len(outputs)
     return loss
 
+def random_rotation_matrices(batch_size, device, dtype=torch.float32):
+    """Равномерно случайные матрицы поворота SO(3), по одной на элемент батча.
+
+    Метод Меццадри: QR-разложение случайной гауссовой матрицы даёт Q, равномерно
+    распределённую на O(3); фиксация знака диагонали R делает распределение Q
+    хаар-равномерной, после чего при необходимости меняется знак одного столбца,
+    чтобы гарантировать det(Q) = +1 (собственно поворот, без отражения).
+    """
+    A = torch.randn(batch_size, 3, 3, device=device, dtype=dtype)
+    Q, R = torch.linalg.qr(A)
+    d = torch.diagonal(R, dim1=-2, dim2=-1)
+    Q = Q * torch.sign(d).unsqueeze(-2)
+    neg_det = torch.linalg.det(Q) < 0
+    Q[neg_det, :, 0] *= -1
+    return Q
+
+def random_axis_permutation_matrices(batch_size, device, dtype=torch.float32):
+    """Случайные перестановки порядка координатных осей (напр. x1 x2 x3 -> x2 x1 x3),
+    по одной перестановочной матрице на элемент батча."""
+    perms = torch.stack([torch.randperm(3, device=device) for _ in range(batch_size)])
+    return torch.eye(3, device=device, dtype=dtype)[perms]
+
+def random_reflection_matrices(batch_size, device, dtype=torch.float32):
+    """Случайные отражения по координатным осям (каждая из x1,x2,x3 независимо
+    с вероятностью 1/2), по одной диагональной матрице ±1 на элемент батча."""
+    signs = torch.randint(0, 2, (batch_size, 3), device=device, dtype=dtype) * 2 - 1
+    return torch.diag_embed(signs)
+
+def apply_orthogonal_transform(T, *tensors):
+    """Применяет батч ортогональных преобразований T (B, 3, 3) к позициям/направлениям.
+
+    Каждый тензор в tensors — либо (B, N, 3) (точки/направления на каждую точку),
+    либо (B, 3) (одиночный вектор на элемент батча, напр. центр входа/выхода).
+    """
+    result = []
+    for t in tensors:
+        if t.dim() == 3:
+            result.append(torch.einsum('bij,bnj->bni', T, t))
+        else:
+            result.append(torch.einsum('bij,bj->bi', T, t))
+    return result
+
 def point_to_triangles_distance(
     points,               # (P, 3)
     triangles,            # (T, 3, 3)

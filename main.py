@@ -18,7 +18,7 @@ torch.backends.cuda.enable_mem_efficient_sdp(False)
 torch.backends.cuda.enable_math_sdp(True)
 
 LOCAL = False
-FULL_TRAIN = False
+FULL_TRAIN = True
 USE_CLEARML = True
 
 USE_EMB = True
@@ -38,17 +38,21 @@ _BND_START = INTERIOR_SIZE                                             # нач�
 _BND_END   = INTERIOR_SIZE + WALLS_SIZE + INLET_SIZE + OUTLET_SIZE    # конец non-outerior
 
 PHI_EPOCHS = 10000
-EPOCHS = 200
+EPOCHS = 10000
 DIV_POR = 5
 VAL_EVERY = 50
-B = 2
+B = 8
 
 RESUME_PINN = False
 RESUME_TASK = 'a6c0b9d0b4b44b918462644b3c35e3af'
 GEN_POINTS = False
 
+AUGMENT_ROTATION = True
+AUGMENT_PERMUTE = True
+AUGMENT_REFLECT = True
+
 if not LOCAL:
-    dataset_train = Dataset.get(dataset_name='SimVascDataset', dataset_project='kornaeva-rnf/GA_PINN_3D')
+    dataset_train = Dataset.get(dataset_name='SimVascDatasetFull', dataset_project='kornaeva-rnf/GA_PINN_3D')
     DATASET_PATH = dataset_train.get_local_copy()
 
     del dataset_train
@@ -103,6 +107,9 @@ CONSTANTS = {
     'RESUME_PINN': RESUME_PINN,
     'RESUME_TASK': RESUME_TASK,
     'GEN_POINTS': GEN_POINTS,
+    'AUGMENT_ROTATION': AUGMENT_ROTATION,
+    'AUGMENT_PERMUTE': AUGMENT_PERMUTE,
+    'AUGMENT_REFLECT': AUGMENT_REFLECT,
     'DATASET_PATH': DATASET_PATH,
     'SPLIT': SPLIT,
 }
@@ -454,6 +461,19 @@ def run_batches(loader, i, train):
     for x, phi, out, norm_in, norm_out, center_out, l, s, v_mean, x_label in tqdm(loader):
         x, phi, out, norm_in, norm_out, center_out, l, s, v_mean, x_label = \
             x.to('cuda'), phi.to('cuda'), out.to('cuda'), norm_in.to('cuda'), norm_out.to('cuda'), center_out.to('cuda'), l.to('cuda'), s.to('cuda'), v_mean.to('cuda'), x_label.to('cuda')
+
+        if train and (AUGMENT_ROTATION or AUGMENT_PERMUTE or AUGMENT_REFLECT):
+            T = torch.eye(3, device=x.device, dtype=x.dtype).unsqueeze(0).repeat(x.shape[0], 1, 1)
+            if AUGMENT_ROTATION:
+                T = random_rotation_matrices(x.shape[0], x.device, x.dtype) @ T
+            if AUGMENT_REFLECT:
+                T = random_reflection_matrices(x.shape[0], x.device, x.dtype) @ T
+            if AUGMENT_PERMUTE:
+                T = random_axis_permutation_matrices(x.shape[0], x.device, x.dtype) @ T
+
+            x, norm_in, norm_out, center_out = apply_orthogonal_transform(T, x, norm_in, norm_out, center_out)
+            center_in_aug, center_out_aug = apply_orthogonal_transform(T, out[:, :3], out[:, 3:])
+            out = torch.cat((center_in_aug, center_out_aug), dim=-1)
 
         if train:
             optimizer_flow.zero_grad()

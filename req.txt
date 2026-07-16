@@ -3,3 +3,4 @@ boto3
 numpy
 numpy-stl
 tqdm
+scikit-learn
