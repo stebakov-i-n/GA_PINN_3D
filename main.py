@@ -38,13 +38,13 @@ _BND_START = INTERIOR_SIZE                                             # нач�
 _BND_END   = INTERIOR_SIZE + WALLS_SIZE + INLET_SIZE + OUTLET_SIZE    # конец non-outerior
 
 PHI_EPOCHS = 10000
-EPOCHS = 10000
+EPOCHS = 1000
 DIV_POR = 5
 VAL_EVERY = 50
 B = 8
 
-RESUME_PINN = False
-RESUME_TASK = 'a6c0b9d0b4b44b918462644b3c35e3af'
+RESUME_PINN = True
+RESUME_TASK = '33d909feabcd4b0bbddd380548891492'
 GEN_POINTS = False
 
 AUGMENT_ROTATION = True
@@ -117,10 +117,22 @@ CONSTANTS = {
 with open(os.path.join(SAVE_DIR, 'config.json'), 'w') as fp:
     json.dump(CONSTANTS, fp, indent=2)
 
+GEOMETRY_SELECTION_PATH = 'geometry_selection.json'
+if os.path.exists(GEOMETRY_SELECTION_PATH):
+    with open(GEOMETRY_SELECTION_PATH, 'r', encoding='utf-8') as fp:
+        GEOMETRY_SELECTION = json.load(fp)
+else:
+    GEOMETRY_SELECTION = {}
+
+# ключи вида "case_dir/file.stl", как их пишет select_geometries.py
+ACCEPTED_GEOMETRIES = {k for k, v in GEOMETRY_SELECTION.items() if v == 'accept'}
+print(f'Loaded {len(ACCEPTED_GEOMETRIES)} accepted geometries from {GEOMETRY_SELECTION_PATH}')
+
 
 class Dataset(torch.utils.data.Dataset):
     def __init__(self, path, split="train"):
         self.data = []
+        self.keys = []
         for dir in os.listdir(path):
             if dir not in SPLIT[split]:
                 continue
@@ -128,9 +140,30 @@ class Dataset(torch.utils.data.Dataset):
                 if (file.count('_') == 1) and (file.split('_')[-1] != '-1.stl') and ('.stl' in file):
                     if (GEN_POINTS) or (file.replace('.stl', '_interior.pt') in os.listdir(os.path.join(path, dir))):
                         self.data.append(load_stl(os.path.join(path, dir, file), odd=False, device='cuda', gen_p=GEN_POINTS))
+                        self.keys.append(os.path.join(dir, file))
                         torch.cuda.empty_cache()
 
-        self.phi_stage = True
+        self._phi_stage = True
+
+    @property
+    def phi_stage(self):
+        return self._phi_stage
+
+    @phi_stage.setter
+    def phi_stage(self, value):
+        # переход на 2-й этап (flow) — оставляем только geometry_selection.json'ом
+        # принятые геометрии; __len__ подхватывает новый (более короткий) self.data сам
+        if (not value) and self._phi_stage:
+            keep = [i for i, k in enumerate(self.keys) if k in ACCEPTED_GEOMETRIES]
+            if not keep:
+                raise RuntimeError(
+                    f"Ни одна геометрия не помечена как 'accept' в {GEOMETRY_SELECTION_PATH} "
+                    "для этого сплита. Запустите select_geometries.py перед переходом на 2-й этап."
+                )
+            self.data = [self.data[i] for i in keep]
+            self.keys = [self.keys[i] for i in keep]
+
+        self._phi_stage = value
 
 
     def __getitem__(self, index):

@@ -259,20 +259,68 @@ def sample_boundary_points_from_stl(path, centering, max_coord, m_all, return_no
 
     areas_all = areas.sum()
 
-    boundary_points = torch.zeros(0, 3)
+    chunks = []
 
     for i in range(len(points)):
         m = areas[i] / (areas_all / m_all)
 
-        boundary_points = torch.concatenate((boundary_points,
-                                             points_on_triangle(points[i], m)))
+        chunks.append(points_on_triangle(points[i], m))
 
-    x = boundary_points
+    x = torch.cat(chunks, dim=0) if chunks else torch.zeros(0, 3)
     if return_norm:
         norm = torch.tensor(mesh_.normals[0])
         norm = norm / torch.norm(norm)
         return x, norm, areas_all / 1e6
     return x
+
+
+def load_geometry_light(path, odd=False, n_walls=1500, n_inlet=400, n_outlet=400,
+                         n_interior=1500, n_outerior=1500, device='cpu'):
+    """Быстрая загрузка геометрии для визуализации: точки + нормали/центры входа-выхода,
+    без вычисления phi (level-set), которое требует дорогого calc_phi по всей стенке.
+    Требует закэшированные path_interior.pt / path_outerior.pt (как load_stl с gen_p=True)."""
+    closed_mesh = mesh.Mesh.from_file(path)
+    closed_points = torch.tensor(np.array(closed_mesh.points))
+
+    centering = torch.zeros(3)
+    centering[0] = closed_points[:, ::3].min() + (closed_points[:, ::3].max() - closed_points[:, ::3].min()) / 2
+    centering[1] = closed_points[:, 1::3].min() + (closed_points[:, 1::3].max() - closed_points[:, 1::3].min()) / 2
+    centering[2] = closed_points[:, 2::3].min() + (closed_points[:, 2::3].max() - closed_points[:, 2::3].min()) / 2
+
+    closed_points[:, :3] -= centering
+    closed_points[:, 3:6] -= centering
+    closed_points[:, 6:9] -= centering
+    max_coord = closed_points.__abs__().max()
+
+    x_dict = {}
+
+    x_dict['interior'] = torch.load(path.replace('.stl', '_interior.pt'))
+    x_dict['interior'] = x_dict['interior'][torch.randperm(len(x_dict['interior']))[:n_interior]]
+
+    x_dict['outerior'] = torch.load(path.replace('.stl', '_outerior.pt'))
+    x_dict['outerior'] = x_dict['outerior'][torch.randperm(len(x_dict['outerior']))[:n_outerior]]
+
+    x_dict['walls'] = sample_boundary_points_from_stl(
+        path.replace('.stl', '_3.stl'), centering, max_coord, int(n_walls * 1.1))
+    x_dict['walls'] = x_dict['walls'][torch.randperm(len(x_dict['walls']))[:n_walls]]
+
+    x_dict['inlet'], norm_in, _ = sample_boundary_points_from_stl(
+        path.replace('.stl', '_1.stl' if odd else '_2.stl'), centering, max_coord,
+        int(n_inlet * 1.1), return_norm=True)
+    x_dict['inlet'] = x_dict['inlet'][torch.randperm(len(x_dict['inlet']))[:n_inlet]]
+
+    x_dict['outlet'], norm_out, _ = sample_boundary_points_from_stl(
+        path.replace('.stl', '_2.stl' if odd else '_1.stl'), centering, max_coord,
+        int(n_outlet * 1.1), return_norm=True)
+    x_dict['outlet'] = x_dict['outlet'][torch.randperm(len(x_dict['outlet']))[:n_outlet]]
+
+    center_in = x_dict['inlet'].mean(0)
+    center_out = x_dict['outlet'].mean(0)
+
+    for k in x_dict:
+        x_dict[k] = x_dict[k].to(device)
+
+    return x_dict, norm_in.to(device), norm_out.to(device), center_in.to(device), center_out.to(device)
 
 
 def load_stl(path, n=50, n_interior=2000000, n_interior_phi=100000, n_outerior=100000, n_walls=100000, n_inlet=20000, n_outlet=20000, odd=False, length=[1., 1., 1.], device='cpu', inside_buffer=0.001, gen_p=True):
