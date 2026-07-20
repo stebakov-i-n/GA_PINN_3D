@@ -143,27 +143,23 @@ class Dataset(torch.utils.data.Dataset):
                         self.keys.append(os.path.join(dir, file))
                         torch.cuda.empty_cache()
 
-        self._phi_stage = True
+        self.phi_stage = True
 
-    @property
-    def phi_stage(self):
-        return self._phi_stage
+    def enter_flow_stage(self):
+        """Переход на 2-й этап (flow): оставляет только принятые в geometry_selection.json
+        геометрии и выключает phi_stage. __len__ сам подхватывает укороченный self.data."""
+        if not self.phi_stage:
+            return
 
-    @phi_stage.setter
-    def phi_stage(self, value):
-        # переход на 2-й этап (flow) — оставляем только geometry_selection.json'ом
-        # принятые геометрии; __len__ подхватывает новый (более короткий) self.data сам
-        if (not value) and self._phi_stage:
-            keep = [i for i, k in enumerate(self.keys) if k in ACCEPTED_GEOMETRIES]
-            if not keep:
-                raise RuntimeError(
-                    f"Ни одна геометрия не помечена как 'accept' в {GEOMETRY_SELECTION_PATH} "
-                    "для этого сплита. Запустите select_geometries.py перед переходом на 2-й этап."
-                )
-            self.data = [self.data[i] for i in keep]
-            self.keys = [self.keys[i] for i in keep]
-
-        self._phi_stage = value
+        keep = [i for i, k in enumerate(self.keys) if k in ACCEPTED_GEOMETRIES]
+        if not keep:
+            raise RuntimeError(
+                f"Ни одна геометрия не помечена как 'accept' в {GEOMETRY_SELECTION_PATH} "
+                "для этого сплита. Запустите select_geometries.py перед переходом на 2-й этап."
+            )
+        self.data = [self.data[i] for i in keep]
+        self.keys = [self.keys[i] for i in keep]
+        self.phi_stage = False
 
 
     def __getitem__(self, index):
@@ -436,7 +432,8 @@ if RESUME_PINN:
 
     history_path = resume_task.artifacts['history'].get_local_copy()
     model_path = resume_task.artifacts['model'].get_local_copy()    
-    optimizer_path = resume_task.artifacts['optimizer'].get_local_copy()
+    optimizer_flow_path = resume_task.artifacts['optimizer_flow'].get_local_copy()
+    optimizer_phi_path = resume_task.artifacts['optimizer_phi'].get_local_copy()
     ga_pinn.load_state_dict(torch.load(model_path))
 
 
@@ -450,7 +447,8 @@ optimizer_phi = torch.optim.Adam([*ga_pinn.linear_emb.parameters(), *ga_pinn.enc
 optimizer_flow = torch.optim.Adam([*ga_pinn.linear_out_v.parameters(), *ga_pinn.linear_out_p.parameters()], lr=5e-4)
 
 if RESUME_PINN:
-    optimizer_flow.load_state_dict(torch.load(optimizer_path))
+    optimizer_flow.load_state_dict(torch.load(optimizer_flow_path))
+    optimizer_phi.load_state_dict(torch.load(optimizer_phi_path))
 
 lr_scheduler_phi = torch.optim.lr_scheduler.StepLR(optimizer_phi, 200, 0.97,
                                                     last_epoch=- 1)
@@ -606,21 +604,21 @@ def do_val(i):
 
 
 for i in tqdm(range(complete_epochs, complete_epochs + EPOCHS)):
-    do_train(i)
-
-    if i % VAL_EVERY == 0:
-        do_val(i)
-
     if (i >= PHI_EPOCHS) and flag:
         flag = False
         lr_scheduler_flow = torch.optim.lr_scheduler.StepLR(optimizer_flow, 400, 0.97,
                                                 last_epoch=- 1)
 
-        dataset_train.phi_stage = False
-        dataset_val.phi_stage = False
+        dataset_train.enter_flow_stage()
+        dataset_val.enter_flow_stage()
 
         loader_train = torch.utils.data.DataLoader(dataset_train, batch_size=B, shuffle=True)
         loader_val = torch.utils.data.DataLoader(dataset_val, batch_size=B, shuffle=False)
+
+    do_train(i)
+
+    if i % VAL_EVERY == 0:
+        do_val(i)
 
 if USE_CLEARML:
     task.upload_artifact(f'model', artifact_object=os.path.join(SAVE_DIR, 'model.pth'))
