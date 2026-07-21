@@ -47,7 +47,7 @@ def find_all_geometries(dataset_path):
             continue
         for file in sorted(os.listdir(case_path)):
             if (file.count('_') == 1) and (file.split('_')[-1] != '-1.stl') and ('.stl' in file):
-                paths.append(os.path.join(case_dir, file))
+                paths.append(os.path.join(case_dir, file).replace("/", "\\"))
     return paths
 
 
