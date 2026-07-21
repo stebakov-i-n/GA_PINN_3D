@@ -79,12 +79,13 @@ class _NullLogger:
         pass
 
 if FULL_TRAIN:
-    SPLIT = {'train': [], 'val': [], 'test': []}
-
-    SPLIT['train'], SPLIT['val'] = train_test_split(os.listdir(DATASET_PATH), test_size=0.222, random_state=13)
-    SPLIT['val'], SPLIT['test'] = train_test_split(SPLIT['val'], test_size=0.5, random_state=13)
+    with open('full_split.json', 'r') as fp:
+        SPLIT = json.load(fp)    
 else:
-    SPLIT = {'train': ["0145_H_CORO_KD", "0151_H_AO_H"], 'val': ["0096_A_AO_COA"], 'test': ["0209_H_CERE_CA"]}
+    with open('debug_split.json', 'r') as fp:
+        SPLIT = json.load(fp) 
+
+print(SPLIT)
 
 CONSTANTS = {
     'LOCAL': LOCAL,
@@ -140,7 +141,7 @@ class Dataset(torch.utils.data.Dataset):
                 if (file.count('_') == 1) and (file.split('_')[-1] != '-1.stl') and ('.stl' in file):
                     if (GEN_POINTS) or (file.replace('.stl', '_interior.pt') in os.listdir(os.path.join(path, dir))):
                         self.data.append(load_stl(os.path.join(path, dir, file), odd=False, device='cuda', gen_p=GEN_POINTS))
-                        self.keys.append(os.path.join(dir, file))
+                        self.keys.append(os.path.join(dir, file).replace("/", "\\"))
                         torch.cuda.empty_cache()
 
         self.phi_stage = True
@@ -150,8 +151,11 @@ class Dataset(torch.utils.data.Dataset):
         геометрии и выключает phi_stage. __len__ сам подхватывает укороченный self.data."""
         if not self.phi_stage:
             return
-
+        print(ACCEPTED_GEOMETRIES)
+        print(self.keys)
+        
         keep = [i for i, k in enumerate(self.keys) if k in ACCEPTED_GEOMETRIES]
+        print(keep)
         if not keep:
             raise RuntimeError(
                 f"Ни одна геометрия не помечена как 'accept' в {GEOMETRY_SELECTION_PATH} "
@@ -207,7 +211,7 @@ class Dataset(torch.utils.data.Dataset):
         phi_key = "in" if inlet == 'inlet' else 'out'
 
         phi_in = torch.cat([
-                agg[f'phi_{phi_key}_dict']['interior'][idx_int],
+                agg[f'phi_{phi_key}_dict']['interior'][idx_int] if self.phi_stage else agg[f'phi_{phi_key}_dict']['interior'][:INTERIOR_SIZE],
                 agg[f'phi_{phi_key}_dict']['walls'][idx_w],
                 agg[f'phi_{phi_key}_dict']['inlet'][idx_in],
                 agg[f'phi_{phi_key}_dict']['outlet'][idx_out],
@@ -469,7 +473,7 @@ if RESUME_PINN:
 
 logger = task.get_logger() if USE_CLEARML else _NullLogger()
 
-complete_epochs = len(history['res_1']) + len(history['mse_phi'])
+complete_epochs = len(history['res_4']) + len(history['mse_phi'])
 
 flag = True
 
@@ -622,6 +626,7 @@ for i in tqdm(range(complete_epochs, complete_epochs + EPOCHS)):
 
 if USE_CLEARML:
     task.upload_artifact(f'model', artifact_object=os.path.join(SAVE_DIR, 'model.pth'))
+    task.upload_artifact(f'model_best', artifact_object=os.path.join(SAVE_DIR, 'model_best.pth'))
     task.upload_artifact(f'history', artifact_object=os.path.join(SAVE_DIR, 'history.json'))
     task.upload_artifact(f'history_val', artifact_object=os.path.join(SAVE_DIR, 'history_val.json'))
     task.upload_artifact(f'optimizer_phi', artifact_object=os.path.join(SAVE_DIR, 'optimizer_phi.pth'))

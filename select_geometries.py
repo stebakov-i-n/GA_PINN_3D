@@ -39,7 +39,7 @@ NORMAL_COLOR = '#e34948'
 
 
 def find_all_geometries(dataset_path):
-    """Те же файлы, что видит Dataset.__init__ в main.py: *_N.stl с закэшированными .pt."""
+    """Те же файлы, что видит Dataset.__init__ в main.py: *_N.stl"""
     paths = []
     for case_dir in sorted(os.listdir(dataset_path)):
         case_path = os.path.join(dataset_path, case_dir)
@@ -47,8 +47,7 @@ def find_all_geometries(dataset_path):
             continue
         for file in sorted(os.listdir(case_path)):
             if (file.count('_') == 1) and (file.split('_')[-1] != '-1.stl') and ('.stl' in file):
-                if file.replace('.stl', '_interior.pt') in os.listdir(case_path):
-                    paths.append(os.path.join(case_dir, file))
+                paths.append(os.path.join(case_dir, file))
     return paths
 
 
