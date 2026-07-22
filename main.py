@@ -38,18 +38,18 @@ _BND_START = INTERIOR_SIZE                                             # нач�
 _BND_END   = INTERIOR_SIZE + WALLS_SIZE + INLET_SIZE + OUTLET_SIZE    # конец non-outerior
 
 PHI_EPOCHS = 10000
-EPOCHS = 1000
+EPOCHS = 2000
 DIV_POR = 5
 VAL_EVERY = 50
-B = 8
+B = 2
 
 RESUME_PINN = True
 RESUME_TASK = '33d909feabcd4b0bbddd380548891492'
 GEN_POINTS = False
 
-AUGMENT_ROTATION = True
-AUGMENT_PERMUTE = True
-AUGMENT_REFLECT = True
+AUGMENT_ROTATION = False
+AUGMENT_PERMUTE = False
+AUGMENT_REFLECT = False
 
 if not LOCAL:
     dataset_train = Dataset.get(dataset_name='SimVascDatasetFull', dataset_project='kornaeva-rnf/GA_PINN_3D')
@@ -84,8 +84,6 @@ if FULL_TRAIN:
 else:
     with open('debug_split.json', 'r') as fp:
         SPLIT = json.load(fp) 
-
-print(SPLIT)
 
 CONSTANTS = {
     'LOCAL': LOCAL,
@@ -151,11 +149,9 @@ class Dataset(torch.utils.data.Dataset):
         геометрии и выключает phi_stage. __len__ сам подхватывает укороченный self.data."""
         if not self.phi_stage:
             return
-        print(ACCEPTED_GEOMETRIES)
-        print(self.keys)
         
         keep = [i for i, k in enumerate(self.keys) if k in ACCEPTED_GEOMETRIES]
-        print(keep)
+
         if not keep:
             raise RuntimeError(
                 f"Ни одна геометрия не помечена как 'accept' в {GEOMETRY_SELECTION_PATH} "
@@ -385,9 +381,6 @@ class GAPinn(nn.Module):
         ])
 
     def forward(self, x, out, norm_in, norm_out, center_out, l, s, v_mean, x_label, pinn=False):
-
-        B = x.shape[0]
-
         if pinn:
             x_grad = x * 2 * l
             # x_grad = x
