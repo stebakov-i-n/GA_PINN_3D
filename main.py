@@ -512,7 +512,7 @@ def run_batches(loader, i, train):
         if is_flow_epoch:
             dv1, dv2, dv3, d2v1, d2v2, d2v3, dp = calc_grad(v1, v2, v3, p, x_grad, div_v_only=i < PHI_EPOCHS)
 
-            res = calc_res(v1, v2, v3, p, dv1, dv2, dv3, d2v1, d2v2, d2v3, dp, div_v_only=i < PHI_EPOCHS)
+            res = calc_res(v1, v2, v3, p, dv1[:, :_BND_END], dv2[:, :_BND_END], dv3[:, :_BND_END], d2v1[:, :_BND_END], d2v2[:, :_BND_END], d2v3[:, :_BND_END], dp[:, :_BND_END], div_v_only=i < PHI_EPOCHS)
 
             loss = zero_loss(res)
         else:
