@@ -1,0 +1,50 @@
+fluid:
+  density_kg_m3: 1050.0
+  dynamic_viscosity_pa_s: 0.003
+
+flow:
+  mean_inlet_velocity_m_s: 0.75
+  regime: steady_incompressible_laminar
+  gravity: false
+
+geometry:
+  source_length_unit: mm
+  solver_length_unit: m
+  dataset_root: SimVascDataset
+  split_manifest: full_split.json
+  selection_manifest: geometry_selection.json
+
+boundary_conditions:
+  wall: no_slip
+  outlet_gauge_pressure_pa: 0.0
+  vascular_inlet_profile: unresolved
+
+vascular:
+  inlet_profile: uniform_normal
+  mesh:
+    background_cells: [24, 24, 48]
+    background_padding_fraction: 0.25
+    surface_refinement_level: [0, 1]
+    feature_extract_included_angle_deg: 150
+    location_in_mesh: auto
+  solver:
+    max_final_continuity_local: 1.0e-4
+    max_final_velocity_residual: 1.0e-4
+    max_final_pressure_residual: 1.0e-4
+
+openfoam:
+  distribution: OpenCFD
+  version: v2606
+  solver: simpleFoam
+  end_time: 500
+  write_interval: 100
+
+cylinder:
+  radius_m: 0.0008
+  length_m: 0.05
+  radial_samples: 101
+  circumferential_segments: 48
+  axial_segments: 8
+
+runtime:
+  default_output_root: cfd_runs
