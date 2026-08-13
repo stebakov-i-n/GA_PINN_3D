@@ -417,7 +417,7 @@ def load_stl(path, n=50, n_interior=2000000, n_interior_phi=100000, n_outerior=1
     tr_in = tr_in / max_coord / 2
     tr_in = tr_in.reshape(-1, 3, 3)
 
-    tr_out = mesh.Mesh.from_file(path.replace('.stl', '_1.stl' if odd else '_2.stl'))
+    tr_out = mesh.Mesh.from_file(path.replace('.stl', '_2.stl' if odd else '_1.stl'))
     
     tr_out = torch.tensor(np.array(tr_out.points)).to(device)
 
