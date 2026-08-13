@@ -17,3 +17,14 @@ __pycache__
 SimVascDataset old
 .claude
 __pycache__
+
+# CFD/OpenFOAM generated artifacts
+cfd_runs/
+processor*/
+postProcessing/
+dynamicCode/
+
+# Local Python/dev artifacts
+.venv/
+.pytest_cache/
+.DS_Store
