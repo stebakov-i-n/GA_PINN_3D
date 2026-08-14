@@ -18,7 +18,7 @@ torch.backends.cuda.enable_mem_efficient_sdp(False)
 torch.backends.cuda.enable_math_sdp(True)
 
 LOCAL = False
-FULL_TRAIN = False
+FULL_TRAIN = True
 USE_CLEARML = True
 
 USE_EMB = True
@@ -43,16 +43,16 @@ PHI_EPOCHS = 15000
 EPOCHS = 20000
 DIV_POR = 5
 VAL_EVERY = 50
-B_FLOW = 10
-B = 10
+B_FLOW = 64
+B = 64
 
 RESUME_PINN = False
 RESUME_TASK = '2d26aafa8d0445f7a1ab3040b1dca91b'
 GEN_POINTS = False
 
-AUGMENT_ROTATION = True
-AUGMENT_PERMUTE = True
-AUGMENT_REFLECT = True
+AUGMENT_ROTATION = False
+AUGMENT_PERMUTE = False
+AUGMENT_REFLECT = False
 
 if not LOCAL:
     dataset_train = Dataset.get(dataset_name='SimVascDatasetFull', dataset_project='kornaeva-rnf/GA_PINN_3D')
@@ -347,23 +347,11 @@ class GAPinn(nn.Module):
                         get_act(),
                         nn.Linear(d_hidden_v, d_hidden_v),
                         get_act(),
-                        nn.Linear(d_hidden_v, d_hidden_v),
-                        get_act(),
-                        nn.Linear(d_hidden_v, d_hidden_v),
-                        get_act(),
-                        nn.Linear(d_hidden_v, d_hidden_v),
-                        get_act(),
                         nn.Linear(d_hidden_phi, 2)
                     ])
         
         self.linear_out_flow = nn.Sequential(*[
             nn.Linear(d_model + (3 if USE_CLS_TOKEN else 0), d_hidden_v),
-            get_act(),
-            nn.Linear(d_hidden_v, d_hidden_v),
-            get_act(),
-            nn.Linear(d_hidden_v, d_hidden_v),
-            get_act(),
-            nn.Linear(d_hidden_v, d_hidden_v),
             get_act(),
             nn.Linear(d_hidden_v, d_hidden_v),
             get_act(),
@@ -410,10 +398,10 @@ class GAPinn(nn.Module):
             cls_out = enc_output[:, 0:1]                                                        # (B, 1, d_model)
 
             phi_pred = self.linear_out_phi(torch.cat((
-                cls_out.expand(-1, coord.shape[1], -1), coord), -1))
+                cls_out.expand(-1, coord.shape[1], -1), (coord / ((l * 2) if pinn else 1))), -1))
 
             pred = self.linear_out_flow(torch.cat((
-                cls_out.expand(-1, _BND_END, -1), coord[:, :_BND_END]), -1))
+                cls_out.expand(-1, _BND_END, -1), (coord / ((l * 2) if pinn else 1))[:, :_BND_END]), -1))
         else:
             e_outputs = self.encoder(x_proj_enc)
 
