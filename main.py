@@ -17,9 +17,9 @@ torch.backends.cuda.enable_flash_sdp(False)
 torch.backends.cuda.enable_mem_efficient_sdp(False)
 torch.backends.cuda.enable_math_sdp(True)
 
-LOCAL = True
+LOCAL = False
 FULL_TRAIN = False
-USE_CLEARML = False
+USE_CLEARML = True
 
 USE_EMB = True
 ACT = 'wave'
@@ -40,11 +40,11 @@ _BND_START = INTERIOR_SIZE                                             # нач�
 _BND_END   = INTERIOR_SIZE + WALLS_SIZE + INLET_SIZE + OUTLET_SIZE    # конец non-outerior
 
 PHI_EPOCHS = 15000
-EPOCHS = 10000
+EPOCHS = 20000
 DIV_POR = 5
 VAL_EVERY = 50
-B_FLOW = 6
-B = 6
+B_FLOW = 10
+B = 10
 
 RESUME_PINN = False
 RESUME_TASK = '2d26aafa8d0445f7a1ab3040b1dca91b'
@@ -353,31 +353,11 @@ class GAPinn(nn.Module):
                         get_act(),
                         nn.Linear(d_hidden_v, d_hidden_v),
                         get_act(),
-                        nn.Linear(d_hidden_v, d_hidden_v),
-                        get_act(),
-                        nn.Linear(d_hidden_v, d_hidden_v),
-                        get_act(),
-                        nn.Linear(d_hidden_v, d_hidden_v),
-                        get_act(),
-                        nn.Linear(d_hidden_v, d_hidden_v),
-                        get_act(),
-                        nn.Linear(d_hidden_v, d_hidden_v),
-                        get_act(),
                         nn.Linear(d_hidden_phi, 2)
                     ])
         
         self.linear_out_flow = nn.Sequential(*[
             nn.Linear(d_model + (3 if USE_CLS_TOKEN else 0), d_hidden_v),
-            get_act(),
-            nn.Linear(d_hidden_v, d_hidden_v),
-            get_act(),
-            nn.Linear(d_hidden_v, d_hidden_v),
-            get_act(),
-            nn.Linear(d_hidden_v, d_hidden_v),
-            get_act(),
-            nn.Linear(d_hidden_v, d_hidden_v),
-            get_act(),
-            nn.Linear(d_hidden_v, d_hidden_v),
             get_act(),
             nn.Linear(d_hidden_v, d_hidden_v),
             get_act(),
