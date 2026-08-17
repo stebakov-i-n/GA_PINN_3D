@@ -18,11 +18,12 @@ torch.backends.cuda.enable_mem_efficient_sdp(False)
 torch.backends.cuda.enable_math_sdp(True)
 
 LOCAL = False
-FULL_TRAIN = True
+FULL_TRAIN = False
 USE_CLEARML = True
 
 USE_EMB = True
-ACT = 'wave'
+ACT_TF = 'relu'
+ACT_DEC = 'wave'
 USE_CLS_TOKEN = True   # False = старая архитектура (decoder_phi + cross-attention);
                         # True = CLS-токен: MLP phi/flow берут на вход [cls_output, x_grad]
 
@@ -43,16 +44,17 @@ PHI_EPOCHS = 15000
 EPOCHS = 20000
 DIV_POR = 5
 VAL_EVERY = 50
-B_FLOW = 64
-B = 64
+B = 10
 
 RESUME_PINN = False
 RESUME_TASK = '2d26aafa8d0445f7a1ab3040b1dca91b'
+RESUME_PATH = 'trained_models/2026-07-04_13-35-26'
+RESUME_SOURCE = 'clearml'
 GEN_POINTS = False
 
-AUGMENT_ROTATION = False
-AUGMENT_PERMUTE = False
-AUGMENT_REFLECT = False
+AUGMENT_ROTATION = True
+AUGMENT_PERMUTE = True
+AUGMENT_REFLECT = True
 
 if not LOCAL:
     dataset_train = Dataset.get(dataset_name='SimVascDatasetFull', dataset_project='kornaeva-rnf/GA_PINN_3D')
@@ -71,7 +73,7 @@ if USE_CLEARML:
     if not LOCAL:
         task = Task.init(auto_connect_frameworks=False)
     else:
-        task = Task.init(project_name='kornaeva-rnf/GA_PINN_3D', task_name='Test_3', auto_connect_frameworks=False)
+        task = Task.init(project_name='kornaeva-rnf/GA_PINN_3D', task_name='Test_5', auto_connect_frameworks=False)
 else:
     task = None
 
@@ -94,7 +96,8 @@ CONSTANTS = {
     'USE_CLEARML': USE_CLEARML,
     'USE_EMB': USE_EMB,
     'USE_CLS_TOKEN': USE_CLS_TOKEN,
-    'ACT': ACT,
+    'ACT_TF': ACT_TF,
+    'ACT_DEC': ACT_DEC,
     'INTERIOR_SIZE': INTERIOR_SIZE,
     'WALLS_SIZE': WALLS_SIZE,
     'INLET_SIZE': INLET_SIZE,
@@ -109,6 +112,7 @@ CONSTANTS = {
     'B': B,
     'RESUME_PINN': RESUME_PINN,
     'RESUME_TASK': RESUME_TASK,
+    'RESUME_PATH': RESUME_PATH,
     'GEN_POINTS': GEN_POINTS,
     'AUGMENT_ROTATION': AUGMENT_ROTATION,
     'AUGMENT_PERMUTE': AUGMENT_PERMUTE,
@@ -239,13 +243,15 @@ class Dataset(torch.utils.data.Dataset):
 def get_clones(module, N):
     return nn.ModuleList([copy.deepcopy(module) for i in range(N)])
 
-def get_act():
-    if ACT == 'wave':
+def get_act(act):
+    if act == 'wave':
         return WaveAct()
-    elif ACT == 'tanh':
+    elif act == 'tanh':
         return torch.nn.Tanh()
-    elif ACT == 'silu':
+    elif act == 'silu':
         return nn.SiLU(inplace=True)
+    elif act == 'relu':
+            return nn.ReLU(inplace=True)
 
 class WaveAct(nn.Module):
     def __init__(self):
@@ -261,9 +267,9 @@ class FeedForward(nn.Module):
         super(FeedForward, self).__init__() 
         self.linear = nn.Sequential(*[
             nn.Linear(d_model, d_ff),
-            get_act(),
+            get_act(ACT_TF),
             nn.Linear(d_ff, d_ff),
-            get_act(),
+            get_act(ACT_TF),
             nn.Linear(d_ff, d_model)
         ])
 
@@ -277,8 +283,8 @@ class EncoderLayer(nn.Module):
 
         self.attn = nn.MultiheadAttention(embed_dim=d_model, num_heads=heads, batch_first=True)
         self.ff = FeedForward(d_model)
-        self.act1 = get_act()
-        self.act2 = get_act()
+        self.act1 = get_act(ACT_TF)
+        self.act2 = get_act(ACT_TF)
         
     def forward(self, x):
         x2 = self.act1(x)
@@ -294,8 +300,8 @@ class DecoderLayer(nn.Module):
 
         self.attn = nn.MultiheadAttention(embed_dim=d_model, num_heads=heads, batch_first=True)
         self.ff = FeedForward(d_model)
-        self.act1 = get_act()
-        self.act2 = get_act()
+        self.act1 = get_act(ACT_TF)
+        self.act2 = get_act(ACT_TF)
 
     def forward(self, x, e_outputs): 
         x2 = self.act1(x)
@@ -310,7 +316,7 @@ class Encoder(nn.Module):
         super(Encoder, self).__init__()
         self.N = N
         self.layers = get_clones(EncoderLayer(d_model, heads), N)
-        self.act = get_act()
+        self.act = get_act(ACT_TF)
 
     def forward(self, x):
         for i in range(self.N):
@@ -323,7 +329,7 @@ class Decoder(nn.Module):
         super(Decoder, self).__init__()
         self.N = N
         self.layers = get_clones(DecoderLayer(d_model, heads), N)
-        self.act = get_act()
+        self.act = get_act(ACT_TF)
         
     def forward(self, x, e_outputs):
         for i in range(self.N):
@@ -343,18 +349,18 @@ class GAPinn(nn.Module):
         self.encoder = Encoder(d_model, N, heads)
 
         self.linear_out_phi = nn.Sequential(*[
-                        nn.Linear(d_model + (3 if USE_CLS_TOKEN else 0), d_hidden_phi),
-                        get_act(),
-                        nn.Linear(d_hidden_v, d_hidden_v),
-                        get_act(),
+                        nn.Linear(d_model + (9 if USE_CLS_TOKEN else 0), d_hidden_phi),
+                        get_act(ACT_DEC),
+                        nn.Linear(d_hidden_phi, d_hidden_phi),
+                        get_act(ACT_DEC),
                         nn.Linear(d_hidden_phi, 2)
                     ])
-        
+
         self.linear_out_flow = nn.Sequential(*[
-            nn.Linear(d_model + (3 if USE_CLS_TOKEN else 0), d_hidden_v),
-            get_act(),
+            nn.Linear(d_model + (9 if USE_CLS_TOKEN else 0), d_hidden_v),
+            get_act(ACT_DEC),
             nn.Linear(d_hidden_v, d_hidden_v),
-            get_act(),
+            get_act(ACT_DEC),
             nn.Linear(d_hidden_v, 4)
         ])
 
@@ -397,11 +403,15 @@ class GAPinn(nn.Module):
             enc_output = self.encoder(torch.cat((cls_tok, x_proj_enc), dim=1))
             cls_out = enc_output[:, 0:1]                                                        # (B, 1, d_model)
 
+            coord_norm = coord / ((l * 2) if pinn else 1)
+
             phi_pred = self.linear_out_phi(torch.cat((
-                cls_out.expand(-1, coord.shape[1], -1), (coord / ((l * 2) if pinn else 1))), -1))
+                cls_out.expand(-1, coord.shape[1], -1), coord_norm,
+                out.unsqueeze(1).repeat(1, coord.shape[1], 1)), -1))
 
             pred = self.linear_out_flow(torch.cat((
-                cls_out.expand(-1, _BND_END, -1), (coord / ((l * 2) if pinn else 1))[:, :_BND_END]), -1))
+                cls_out.expand(-1, _BND_END, -1), coord_norm[:, :_BND_END],
+                out.unsqueeze(1).repeat(1, _BND_END, 1)), -1))
         else:
             e_outputs = self.encoder(x_proj_enc)
 
@@ -434,23 +444,23 @@ def reset_weights(m):
 ga_pinn = GAPinn().cuda()
 
 if RESUME_PINN:
-    # resume_task = Task.get_task(task_id=RESUME_TASK,
-    #     project_name='kornaeva-rnf/GA_PINN_3D'
-    # )
+    if RESUME_SOURCE == 'cleaml':
+        resume_task = Task.get_task(task_id=RESUME_TASK,
+            project_name='kornaeva-rnf/GA_PINN_3D'
+        )
 
-    # history_path = resume_task.artifacts['history'].get_local_copy()
-    # history_val_path = resume_task.artifacts['history_val'].get_local_copy()
-    # model_path = resume_task.artifacts['model'].get_local_copy()    
-    # optimizer_flow_path = resume_task.artifacts['optimizer_flow'].get_local_copy()
-    # optimizer_phi_path = resume_task.artifacts['optimizer_phi'].get_local_copy()
-
-    history_path = "trained_models/2026-08-13_14-24-56/history.json"
-    history_val_path = "trained_models/2026-08-13_14-24-56/history_val.json"
-    model_path = "trained_models/2026-08-13_14-24-56/model.pth"
-    optimizer_flow_path = "trained_models/2026-08-13_14-24-56/optimizer_flow.pth"
-    optimizer_phi_path = "trained_models/2026-08-13_14-24-56/optimizer_phi.pth"
-    ga_pinn.load_state_dict(torch.load(model_path))
-    # ga_pinn.linear_out_flow = ga_pinn.linear_out_flow.apply(reset_weights)
+        history_path = resume_task.artifacts['history'].get_local_copy()
+        history_val_path = resume_task.artifacts['history_val'].get_local_copy()
+        model_path = resume_task.artifacts['model'].get_local_copy()    
+        optimizer_flow_path = resume_task.artifacts['optimizer_flow'].get_local_copy()
+        optimizer_phi_path = resume_task.artifacts['optimizer_phi'].get_local_copy()
+    else:
+        history_path = f"{RESUME_PATH}/history.json"
+        history_val_path = f"{RESUME_PATH}/history_val.json"
+        model_path = f"{RESUME_PATH}/model.pth"
+        optimizer_flow_path = f"{RESUME_PATH}/optimizer_flow.pth"
+        optimizer_phi_path = f"{RESUME_PATH}/optimizer_phi.pth"
+        ga_pinn.load_state_dict(torch.load(model_path))
 
 
 dataset_train = Dataset(DATASET_PATH, 'train')
@@ -509,7 +519,7 @@ def run_batches(loader, i, train):
     epoch_sums = {'res_1': 0., 'res_2': 0., 'res_3': 0., 'res_4': 0.,
                   'mse_out': 0., 'mse_phi': 0.}
 
-    is_flow_epoch = ((not (i % DIV_POR)) and train) or (i >= PHI_EPOCHS)
+    is_flow_epoch = ((not (i % DIV_POR)) and train and (i != 0)) or (i >= PHI_EPOCHS)
 
     for x, phi, out, norm_in, norm_out, center_out, l, s, v_mean, x_label in tqdm(loader):
         x, phi, out, norm_in, norm_out, center_out, l, s, v_mean, x_label = \
@@ -657,8 +667,8 @@ for i in tqdm(range(complete_epochs, complete_epochs + EPOCHS)):
         dataset_val.enter_flow_stage()
         freeze_phi_trunk(ga_pinn)
 
-        loader_train = torch.utils.data.DataLoader(dataset_train, batch_size=B_FLOW, shuffle=True)
-        loader_val = torch.utils.data.DataLoader(dataset_val, batch_size=B_FLOW, shuffle=False)
+        loader_train = torch.utils.data.DataLoader(dataset_train, batch_size=B, shuffle=True)
+        loader_val = torch.utils.data.DataLoader(dataset_val, batch_size=B, shuffle=False)
 
     do_train(i)
 
