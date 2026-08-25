@@ -17,8 +17,8 @@ torch.backends.cuda.enable_flash_sdp(False)
 torch.backends.cuda.enable_mem_efficient_sdp(False)
 torch.backends.cuda.enable_math_sdp(True)
 
-LOCAL = False
-FULL_TRAIN = False
+LOCAL = True
+FULL_TRAIN = True
 USE_CLEARML = True
 
 USE_EMB = True
@@ -40,16 +40,20 @@ S = 2e-6
 _BND_START = INTERIOR_SIZE                                             # начало boundary (walls)
 _BND_END   = INTERIOR_SIZE + WALLS_SIZE + INLET_SIZE + OUTLET_SIZE    # конец non-outerior
 
-PHI_EPOCHS = 15000
+PHI_EPOCHS = 40000
 EPOCHS = 20000
 DIV_POR = 5
 VAL_EVERY = 50
 B = 10
 
+END_TO_END = True   # True — без разделения на phi/flow: один optimizer_all на все
+                      # веса, каждый батч считает и суммирует loss_phi + loss_res,
+                      # оба логируются каждую эпоху; PHI_EPOCHS/DIV_POR/freeze/enter_flow_stage игнорируются
+
 RESUME_PINN = False
-RESUME_TASK = '2d26aafa8d0445f7a1ab3040b1dca91b'
-RESUME_PATH = 'trained_models/2026-07-04_13-35-26'
-RESUME_SOURCE = 'clearml'
+RESUME_TASK = '0475fded5ace4d9e861b32d2f906fb9a'
+RESUME_PATH = 'trained_models/2026-08-24_23-16-09'
+RESUME_SOURCE = 'local'
 GEN_POINTS = False
 
 AUGMENT_ROTATION = True
@@ -73,7 +77,7 @@ if USE_CLEARML:
     if not LOCAL:
         task = Task.init(auto_connect_frameworks=False)
     else:
-        task = Task.init(project_name='kornaeva-rnf/GA_PINN_3D', task_name='Test_5', auto_connect_frameworks=False)
+        task = Task.init(project_name='kornaeva-rnf/GA_PINN_3D', task_name='Test_6', auto_connect_frameworks=False)
 else:
     task = None
 
@@ -108,6 +112,7 @@ CONSTANTS = {
     'PHI_EPOCHS': PHI_EPOCHS,
     'EPOCHS': EPOCHS,
     'DIV_POR': DIV_POR,
+    'END_TO_END': END_TO_END,
     'VAL_EVERY': VAL_EVERY,
     'B': B,
     'RESUME_PINN': RESUME_PINN,
@@ -337,6 +342,15 @@ class Decoder(nn.Module):
         return self.act(x)
 
 
+class ResBlock(nn.Module):
+    def __init__(self, d, act):
+        super().__init__()
+        self.net = nn.Sequential(nn.Linear(d, d), get_act(act), nn.Linear(d, d))
+        self.act = get_act(act)
+    def forward(self, x):
+        return self.act(x + self.net(x))
+
+
 class GAPinn(nn.Module):
     def __init__(self, d_hidden_phi=256, d_hidden_v=256, d_model=256, N=4, heads=8):
         super(GAPinn, self).__init__()
@@ -350,17 +364,17 @@ class GAPinn(nn.Module):
 
         self.linear_out_phi = nn.Sequential(*[
                         nn.Linear(d_model + (9 if USE_CLS_TOKEN else 0), d_hidden_phi),
-                        get_act(ACT_DEC),
-                        nn.Linear(d_hidden_phi, d_hidden_phi),
-                        get_act(ACT_DEC),
+                        ResBlock(d_hidden_phi, ACT_DEC),
+                        ResBlock(d_hidden_phi, ACT_DEC),
+                        ResBlock(d_hidden_phi, ACT_DEC),
                         nn.Linear(d_hidden_phi, 2)
                     ])
 
         self.linear_out_flow = nn.Sequential(*[
             nn.Linear(d_model + (9 if USE_CLS_TOKEN else 0), d_hidden_v),
-            get_act(ACT_DEC),
-            nn.Linear(d_hidden_v, d_hidden_v),
-            get_act(ACT_DEC),
+            ResBlock(d_hidden_v, ACT_DEC),
+            ResBlock(d_hidden_v, ACT_DEC),
+            ResBlock(d_hidden_v, ACT_DEC),
             nn.Linear(d_hidden_v, 4)
         ])
 
@@ -444,27 +458,47 @@ def reset_weights(m):
 ga_pinn = GAPinn().cuda()
 
 if RESUME_PINN:
-    if RESUME_SOURCE == 'cleaml':
+    if RESUME_SOURCE == 'clearml':
         resume_task = Task.get_task(task_id=RESUME_TASK,
             project_name='kornaeva-rnf/GA_PINN_3D'
         )
 
         history_path = resume_task.artifacts['history'].get_local_copy()
         history_val_path = resume_task.artifacts['history_val'].get_local_copy()
-        model_path = resume_task.artifacts['model'].get_local_copy()    
-        optimizer_flow_path = resume_task.artifacts['optimizer_flow'].get_local_copy()
-        optimizer_phi_path = resume_task.artifacts['optimizer_phi'].get_local_copy()
+        model_path = resume_task.artifacts['model'].get_local_copy()
+        if END_TO_END:
+            optimizer_all_path = resume_task.artifacts['optimizer_all'].get_local_copy()
+        else:
+            optimizer_flow_path = resume_task.artifacts['optimizer_flow'].get_local_copy()
+            optimizer_phi_path = resume_task.artifacts['optimizer_phi'].get_local_copy()
+        ga_pinn.load_state_dict(torch.load(model_path))
     else:
         history_path = f"{RESUME_PATH}/history.json"
         history_val_path = f"{RESUME_PATH}/history_val.json"
         model_path = f"{RESUME_PATH}/model.pth"
-        optimizer_flow_path = f"{RESUME_PATH}/optimizer_flow.pth"
-        optimizer_phi_path = f"{RESUME_PATH}/optimizer_phi.pth"
+        
+        
+        if END_TO_END:
+            optimizer_all_path = f"{RESUME_PATH}/optimizer_all.pth"
+        else:
+            optimizer_flow_path = f"{RESUME_PATH}/optimizer_flow.pth"
+            optimizer_phi_path = f"{RESUME_PATH}/optimizer_phi.pth"
         ga_pinn.load_state_dict(torch.load(model_path))
+
+    # ga_pinn.linear_out_flow = nn.Sequential(*[
+    #         nn.Linear(256 + (9 if USE_CLS_TOKEN else 0), 256),
+    #         ResBlock(256, ACT_DEC),
+    #         ResBlock(256, ACT_DEC),
+    #         ResBlock(256, ACT_DEC),
+    #         nn.Linear(256, 4)
+    #     ]).to('cuda')
 
 
 dataset_train = Dataset(DATASET_PATH, 'train')
 dataset_val = Dataset(DATASET_PATH, 'val')
+
+dataset_train.enter_flow_stage()
+dataset_val.enter_flow_stage()
 
 loader_train = torch.utils.data.DataLoader(dataset_train, batch_size=B, shuffle=True)
 loader_val = torch.utils.data.DataLoader(dataset_val, batch_size=B, shuffle=False)
@@ -475,17 +509,27 @@ if USE_CLS_TOKEN:
 else:
     phi_trunk_params += [*ga_pinn.decoder_phi.parameters()]
 
-optimizer_phi = torch.optim.Adam(phi_trunk_params, lr=5e-4)
-optimizer_flow = torch.optim.Adam([*ga_pinn.linear_out_flow.parameters()], lr=5e-4)
+if END_TO_END:
+    optimizer_all = torch.optim.Adam(ga_pinn.parameters(), lr=5e-4)
+else:
+    optimizer_phi = torch.optim.Adam(phi_trunk_params, lr=5e-4)
+    optimizer_flow = torch.optim.Adam([*ga_pinn.linear_out_flow.parameters()], lr=5e-4)
 
 if RESUME_PINN:
-    optimizer_flow.load_state_dict(torch.load(optimizer_flow_path))
-    optimizer_phi.load_state_dict(torch.load(optimizer_phi_path))
+    if END_TO_END:
+        optimizer_all.load_state_dict(torch.load(optimizer_all_path))
+    else:
+        # optimizer_flow.load_state_dict(torch.load(optimizer_flow_path))
+        optimizer_phi.load_state_dict(torch.load(optimizer_phi_path))
 
-lr_scheduler_phi = torch.optim.lr_scheduler.StepLR(optimizer_phi, 200, 0.97,
-                                                    last_epoch=- 1)
-lr_scheduler_flow = torch.optim.lr_scheduler.StepLR(optimizer_flow, 200, 0.97,
-                                                    last_epoch=- 1)
+if END_TO_END:
+    lr_scheduler_all = torch.optim.lr_scheduler.StepLR(optimizer_all, 400, 0.97,
+                                                        last_epoch=- 1)
+else:
+    lr_scheduler_phi = torch.optim.lr_scheduler.StepLR(optimizer_phi, 400, 0.97,
+                                                        last_epoch=- 1)
+    lr_scheduler_flow = torch.optim.lr_scheduler.StepLR(optimizer_flow, 400, 0.97,
+                                                        last_epoch=- 1)
 loss_fcn = torch.nn.MSELoss()
 
 history = {'res_1': [], 'res_2': [], 'res_3': [], 'res_4': [], 'res_sum': [], 'mse_phi': [], 'lr_flow': [], 'lr_phi': []}
@@ -501,7 +545,7 @@ if RESUME_PINN:
 
 logger = task.get_logger() if USE_CLEARML else _NullLogger()
 
-complete_epochs = len(history['res_4']) + len(history['mse_phi'])
+complete_epochs = len(history['res_4']) if END_TO_END else len(history['res_4']) + len(history['mse_phi'])
 
 flag = True
 
@@ -519,7 +563,7 @@ def run_batches(loader, i, train):
     epoch_sums = {'res_1': 0., 'res_2': 0., 'res_3': 0., 'res_4': 0.,
                   'mse_out': 0., 'mse_phi': 0.}
 
-    is_flow_epoch = ((not (i % DIV_POR)) and train and (i != 0)) or (i >= PHI_EPOCHS)
+    is_flow_epoch = END_TO_END or ((not (i % DIV_POR)) and train and (i != 0)) or (i >= PHI_EPOCHS)
 
     for x, phi, out, norm_in, norm_out, center_out, l, s, v_mean, x_label in tqdm(loader):
         x, phi, out, norm_in, norm_out, center_out, l, s, v_mean, x_label = \
@@ -539,21 +583,29 @@ def run_batches(loader, i, train):
             out = torch.cat((center_in_aug, center_out_aug), dim=-1)
 
         if train:
-            optimizer_flow.zero_grad()
-            optimizer_phi.zero_grad()
+            if END_TO_END:
+                optimizer_all.zero_grad()
+            elif is_flow_epoch:
+                optimizer_flow.zero_grad()
+            else:
+                optimizer_phi.zero_grad()
 
         out_pred, phi_pred, v1, v2, v3, p, x_grad = ga_pinn(x, out, norm_in, norm_out, center_out, l, s, v_mean, x_label, pinn=bool(is_flow_epoch))
 
+        # END_TO_END: обе части лосса считаются и суммируются каждый батч (одни веса,
+        # один optimizer_all) — is_flow_epoch/END_TO_END ниже не exclusive-ветки,
+        # а независимые добавки к loss, как раньше при разделении на фазы.
+        loss = 0
         if is_flow_epoch:
             dv1, dv2, dv3, d2v1, d2v2, d2v3, dp = calc_grad(v1, v2, v3, p, x_grad, div_v_only=i < PHI_EPOCHS * 0)
 
             res = calc_res(v1, v2, v3, p, dv1[:, :_BND_END], dv2[:, :_BND_END], dv3[:, :_BND_END], d2v1[:, :_BND_END], d2v2[:, :_BND_END], d2v3[:, :_BND_END], dp[:, :_BND_END], div_v_only=i < PHI_EPOCHS * 0)
 
-            loss = zero_loss(res)
-        else:
+            loss = loss + zero_loss(res) * 0.000001
+        if (not is_flow_epoch) or END_TO_END:
             loss_phi = loss_fcn(phi_pred, phi)
 
-            loss = loss_phi
+            loss = loss + loss_phi
 
         if train:
             loss.backward()
@@ -567,11 +619,13 @@ def run_batches(loader, i, train):
                 epoch_sums['res_1'] += mse_zero_loss(res[0].detach().cpu()).item()
                 epoch_sums['res_2'] += mse_zero_loss(res[1].detach().cpu()).item()
                 epoch_sums['res_3'] += mse_zero_loss(res[2].detach().cpu()).item()
-        else:
+        if (not is_flow_epoch) or END_TO_END:
             epoch_sums['mse_phi'] += loss_phi.detach().cpu().item()
 
         if train:
-            if is_flow_epoch:
+            if END_TO_END:
+                optimizer_all.step()
+            elif is_flow_epoch:
                 optimizer_flow.step()
             else:
                 optimizer_phi.step()
@@ -592,19 +646,30 @@ def do_train(i):
         if i >= PHI_EPOCHS * 0:
             history['res_sum'].append(mean_val_sum)
             save_callback.step()
-    else:
-        for key in ['mse_phi']:
-            mean_val = epoch_sums[key] / len(loader_train)
-            history[key].append(mean_val)
-            logger.report_scalar(title='Losses', series=key, value=mean_val, iteration=i)
+    if (not is_flow_epoch) or END_TO_END:
+        mean_val = epoch_sums['mse_phi'] / len(loader_train)
+        history['mse_phi'].append(mean_val)
+        logger.report_scalar(title='Losses', series='mse_phi', value=mean_val, iteration=i)
 
     torch.save(ga_pinn.state_dict(), os.path.join(SAVE_DIR, 'model.pth'))
-    torch.save(optimizer_flow.state_dict(), os.path.join(SAVE_DIR, 'optimizer_flow.pth'))
-    torch.save(optimizer_phi.state_dict(), os.path.join(SAVE_DIR, 'optimizer_phi.pth'))
+    
+    if END_TO_END:
+        torch.save(optimizer_all.state_dict(), os.path.join(SAVE_DIR, 'optimizer_all.pth'))
+    else:
+        torch.save(optimizer_flow.state_dict(), os.path.join(SAVE_DIR, 'optimizer_flow.pth'))
+        torch.save(optimizer_phi.state_dict(), os.path.join(SAVE_DIR, 'optimizer_phi.pth'))
+    
     with open(os.path.join(SAVE_DIR, 'history.json'), 'w') as fp:
         json.dump(history, fp)
 
-    if is_flow_epoch:
+    if END_TO_END:
+        lr_scheduler_all.step()
+        lr_all = optimizer_all.param_groups[0]['lr']
+        logger.report_scalar(title='Learning Rate', series='lr_flow', value=lr_all, iteration=i)
+        logger.report_scalar(title='Learning Rate', series='lr_phi', value=lr_all, iteration=i)
+        history['lr_flow'].append(lr_all)
+        history['lr_phi'].append(lr_all)
+    elif is_flow_epoch:
         lr_scheduler_flow.step()
         lr_flow = optimizer_flow.param_groups[0]['lr']
         logger.report_scalar(title='Learning Rate', series='lr_flow', value=lr_flow, iteration=i)
@@ -628,11 +693,10 @@ def do_val(i):
             logger.report_scalar(title='Residuals (val)', series=key, value=mean_val, iteration=i)
         if i >= PHI_EPOCHS * 0:
             history_val['res_sum'].append(mean_val_sum)
-    else:
-        for key in ['mse_phi']:
-            mean_val = epoch_sums[key] / len(loader_val)
-            history_val[key].append(mean_val)
-            logger.report_scalar(title='Losses (val)', series=key, value=mean_val, iteration=i)
+    if (not is_flow_epoch) or END_TO_END:
+        mean_val = epoch_sums['mse_phi'] / len(loader_val)
+        history_val['mse_phi'].append(mean_val)
+        logger.report_scalar(title='Losses (val)', series='mse_phi', value=mean_val, iteration=i)
 
     with open(os.path.join(SAVE_DIR, 'history_val.json'), 'w') as fp:
         json.dump(history_val, fp)
@@ -658,7 +722,7 @@ def freeze_phi_trunk(model):
 
 
 for i in tqdm(range(complete_epochs, complete_epochs + EPOCHS)):
-    if (i >= PHI_EPOCHS) and flag:
+    if (i >= PHI_EPOCHS) and flag and not END_TO_END:
         flag = False
         lr_scheduler_flow = torch.optim.lr_scheduler.StepLR(optimizer_flow, 400, 0.97,
                                                 last_epoch=- 1)
@@ -666,6 +730,8 @@ for i in tqdm(range(complete_epochs, complete_epochs + EPOCHS)):
         dataset_train.enter_flow_stage()
         dataset_val.enter_flow_stage()
         freeze_phi_trunk(ga_pinn)
+
+        # ga_pinn.linear_out_flow = ga_pinn.linear_out_flow.apply(reset_weights)
 
         loader_train = torch.utils.data.DataLoader(dataset_train, batch_size=B, shuffle=True)
         loader_val = torch.utils.data.DataLoader(dataset_val, batch_size=B, shuffle=False)
@@ -680,5 +746,9 @@ if USE_CLEARML:
     task.upload_artifact(f'model_best', artifact_object=os.path.join(SAVE_DIR, 'model_best.pth'))
     task.upload_artifact(f'history', artifact_object=os.path.join(SAVE_DIR, 'history.json'))
     task.upload_artifact(f'history_val', artifact_object=os.path.join(SAVE_DIR, 'history_val.json'))
-    task.upload_artifact(f'optimizer_phi', artifact_object=os.path.join(SAVE_DIR, 'optimizer_phi.pth'))
-    task.upload_artifact(f'optimizer_flow', artifact_object=os.path.join(SAVE_DIR, 'optimizer_flow.pth'))
+    
+    if END_TO_END:
+        task.upload_artifact(f'optimizer_all', artifact_object=os.path.join(SAVE_DIR, 'optimizer_all.pth'))
+    else:
+        task.upload_artifact(f'optimizer_phi', artifact_object=os.path.join(SAVE_DIR, 'optimizer_phi.pth'))
+        task.upload_artifact(f'optimizer_flow', artifact_object=os.path.join(SAVE_DIR, 'optimizer_flow.pth'))

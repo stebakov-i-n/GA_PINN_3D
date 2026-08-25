@@ -28,3 +28,6 @@ dynamicCode/
 .venv/
 .pytest_cache/
 .DS_Store
+
+main copy.py
+main copy 2.py
