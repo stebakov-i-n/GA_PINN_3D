@@ -18,8 +18,8 @@ torch.backends.cuda.enable_mem_efficient_sdp(False)
 torch.backends.cuda.enable_math_sdp(True)
 
 LOCAL = True
-FULL_TRAIN = True
-USE_CLEARML = True
+FULL_TRAIN = False
+USE_CLEARML = False
 
 USE_EMB = True
 ACT_TF = 'relu'
@@ -44,15 +44,15 @@ PHI_EPOCHS = 40000
 EPOCHS = 20000
 DIV_POR = 5
 VAL_EVERY = 50
-B = 10
+B = 10 if LOCAL else 24
 
 END_TO_END = True   # True — без разделения на phi/flow: один optimizer_all на все
                       # веса, каждый батч считает и суммирует loss_phi + loss_res,
                       # оба логируются каждую эпоху; PHI_EPOCHS/DIV_POR/freeze/enter_flow_stage игнорируются
 
-RESUME_PINN = False
-RESUME_TASK = '0475fded5ace4d9e861b32d2f906fb9a'
-RESUME_PATH = 'trained_models/2026-08-24_23-16-09'
+RESUME_PINN = True
+RESUME_TASK = '6ecaa0f3899141a2b3c6a10abcfa434a'
+RESUME_PATH = 'trained_models/end2end_flow'
 RESUME_SOURCE = 'local'
 GEN_POINTS = False
 
@@ -186,7 +186,7 @@ class Dataset(torch.utils.data.Dataset):
 
         agg = self.data[index]
 
-        idx_int   = torch.randperm(len(agg['x_dict']['interior'][:(100000 if self.phi_stage else None)]))[:INTERIOR_SIZE]
+        idx_int   = torch.randperm(len(agg['x_dict']['interior'][:(100000 if (self.phi_stage or END_TO_END) else None)]))[:INTERIOR_SIZE]
         idx_w     = torch.randperm(len(agg['x_dict']['walls']))[:WALLS_SIZE]
         idx_in    = torch.randperm(len(agg['x_dict'][inlet]))[:INLET_SIZE]
         idx_out   = torch.randperm(len(agg['x_dict'][outlet]))[:OUTLET_SIZE]
@@ -208,9 +208,8 @@ class Dataset(torch.utils.data.Dataset):
             torch.full((OUTLET_SIZE,),   3,        dtype=torch.long),
             torch.full((OUTERIOR_SIZE,), 4,        dtype=torch.long),
         ])
-
         phi_w = torch.cat([
-            agg['phi_w_dict']['interior'][idx_int] if self.phi_stage else agg['phi_w_dict']['interior'][:INTERIOR_SIZE],
+            agg['phi_w_dict']['interior'][idx_int] if (self.phi_stage or END_TO_END) else agg['phi_w_dict']['interior'][:INTERIOR_SIZE],
             agg['phi_w_dict']['walls'][idx_w],
             agg['phi_w_dict'][inlet][idx_in],
             agg['phi_w_dict'][outlet][idx_out],
@@ -220,7 +219,7 @@ class Dataset(torch.utils.data.Dataset):
         phi_key = "in" if inlet == 'inlet' else 'out'
 
         phi_in = torch.cat([
-                agg[f'phi_{phi_key}_dict']['interior'][idx_int] if self.phi_stage else agg[f'phi_{phi_key}_dict']['interior'][:INTERIOR_SIZE],
+                agg[f'phi_{phi_key}_dict']['interior'][idx_int] if (self.phi_stage or END_TO_END) else agg[f'phi_{phi_key}_dict']['interior'][:INTERIOR_SIZE],
                 agg[f'phi_{phi_key}_dict']['walls'][idx_w],
                 agg[f'phi_{phi_key}_dict']['inlet'][idx_in],
                 agg[f'phi_{phi_key}_dict']['outlet'][idx_out],
@@ -523,7 +522,7 @@ if RESUME_PINN:
         optimizer_phi.load_state_dict(torch.load(optimizer_phi_path))
 
 if END_TO_END:
-    lr_scheduler_all = torch.optim.lr_scheduler.StepLR(optimizer_all, 400, 0.97,
+    lr_scheduler_all = torch.optim.lr_scheduler.StepLR(optimizer_all, 200, 0.97,
                                                         last_epoch=- 1)
 else:
     lr_scheduler_phi = torch.optim.lr_scheduler.StepLR(optimizer_phi, 400, 0.97,
