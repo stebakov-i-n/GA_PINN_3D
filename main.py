@@ -17,9 +17,9 @@ torch.backends.cuda.enable_flash_sdp(False)
 torch.backends.cuda.enable_mem_efficient_sdp(False)
 torch.backends.cuda.enable_math_sdp(True)
 
-LOCAL = True
-FULL_TRAIN = False
-USE_CLEARML = False
+LOCAL = False
+FULL_TRAIN = True
+USE_CLEARML = True
 
 USE_EMB = True
 ACT_TF = 'relu'
@@ -41,19 +41,19 @@ _BND_START = INTERIOR_SIZE                                             # нач�
 _BND_END   = INTERIOR_SIZE + WALLS_SIZE + INLET_SIZE + OUTLET_SIZE    # конец non-outerior
 
 PHI_EPOCHS = 40000
-EPOCHS = 20000
+EPOCHS = 5000
 DIV_POR = 5
 VAL_EVERY = 50
-B = 10 if LOCAL else 24
+B = 10 if LOCAL else 56
 
 END_TO_END = True   # True — без разделения на phi/flow: один optimizer_all на все
                       # веса, каждый батч считает и суммирует loss_phi + loss_res,
                       # оба логируются каждую эпоху; PHI_EPOCHS/DIV_POR/freeze/enter_flow_stage игнорируются
 
 RESUME_PINN = True
-RESUME_TASK = '6ecaa0f3899141a2b3c6a10abcfa434a'
+RESUME_TASK = '0f6b8dbf1ca84435848b7c6f15306493'
 RESUME_PATH = 'trained_models/end2end_flow'
-RESUME_SOURCE = 'local'
+RESUME_SOURCE = 'clearml'
 GEN_POINTS = False
 
 AUGMENT_ROTATION = True
@@ -522,7 +522,7 @@ if RESUME_PINN:
         optimizer_phi.load_state_dict(torch.load(optimizer_phi_path))
 
 if END_TO_END:
-    lr_scheduler_all = torch.optim.lr_scheduler.StepLR(optimizer_all, 200, 0.97,
+    lr_scheduler_all = torch.optim.lr_scheduler.StepLR(optimizer_all, 400, 0.97,
                                                         last_epoch=- 1)
 else:
     lr_scheduler_phi = torch.optim.lr_scheduler.StepLR(optimizer_phi, 400, 0.97,

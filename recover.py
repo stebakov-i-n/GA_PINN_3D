@@ -24,14 +24,15 @@ ARTIFACT_FILES = {
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--task-id", required=True, help="ClearML task id whose artifacts failed to upload.")
-    parser.add_argument("--run-dir", required=True, help="Local trained_models/<timestamp> folder for that run.")
-    parser.add_argument("--dry-run", action="store_true", help="Only list what would be uploaded.")
+    parser.add_argument("--task-id", default='19e30699b1244fb89166af2e1e7bf5e1', help="ClearML task id whose artifacts failed to upload.")
+    parser.add_argument("--run-dir", default='trained_models/2026-08-25_19-38-00', help="Local trained_models/<timestamp> folder for that run.")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+
+    task = Task.init(auto_connect_frameworks=False)
 
     found = {
         name: path
@@ -42,17 +43,9 @@ def main() -> None:
         print(f"No known artifact files found in {args.run_dir}")
         return
 
-    if args.dry_run:
-        for name, path in found.items():
-            print(f"{name}: {path} ({os.path.getsize(path)} bytes)")
-        return
-
-    task = Task.get_task(task_id=args.task_id)
     for name, path in found.items():
         print(f"Uploading {name} <- {path}")
         task.upload_artifact(name, artifact_object=path)
-
-    task.flush(wait_for_uploads=True)
 
     for name in found:
         artifact = task.artifacts.get(name)
